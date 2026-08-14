@@ -161,6 +161,9 @@ running.
 - **History** of every dictation under Settings → History, with a size limit and
   right-click to delete.
 - **Turkish and English interface**, following the system locale by default.
+- **Azerbaijani** is one of the speech languages, with cleanup, subtitle,
+  minutes and agent prompts written for it rather than borrowed from the
+  Turkish ones. [What to set, and what it cannot fix](docs/azerbaijani.md).
 
 ## The global shortcuts need one logout
 

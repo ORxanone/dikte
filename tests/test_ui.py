@@ -30,7 +30,7 @@ _app = QApplication.instance() or QApplication([])
 # reads.
 CHANGED = {
     "ui_language": "tr",
-    "language": "tr",
+    "language": "az",
     "auto_paste": False,
     "paste_shortcut": "ctrl+shift+v",
     "restore_clipboard": True,
@@ -206,12 +206,51 @@ class Settings(DikteTest):
         self.assertEqual(conf["cancel_shortcut"], "Meta+Shift+Space")
 
     def test_a_prompt_left_at_its_default_is_stored_as_empty(self):
-        """So that switching the interface language switches the prompt too."""
+        """So that switching the spoken language switches the prompt too."""
         conf = cfg.Config()
         self.window(conf)._save()
         self.assertEqual(conf["cleanup_prompt"], "")
         self.assertEqual(conf["meeting_prompt"], "")
         self.assertEqual(conf["assistant_prompt"], "")
+
+    def test_every_language_the_box_offers_survives_a_save(self):
+        """_select_data drops back to the first entry for a code it cannot
+        find, so a language the box does not list is silently reset to
+        "Detect automatically" the next time anybody presses Save."""
+        for _label, code in settings_ui.LANGUAGES:
+            with self.subTest(language=code):
+                self.write_config({"language": code})
+                conf = cfg.Config()
+                self.window(conf)._save()
+                self.assertEqual(conf["language"], code)
+
+    def test_changing_the_spoken_language_changes_the_prompts_with_it(self):
+        """The boxes still hold the previous language's text when Save runs.
+        Storing that would freeze the prompt: it would look like something
+        typed by hand and stop following the language for good."""
+        conf = cfg.Config()                      # ships dictating Turkish
+        window = self.window(conf)
+        self.assertEqual(window.cleanup_prompt.toPlainText().strip(),
+                         cfg.CLEANUP_PROMPT_TR)
+        window._select_data(window.language, "az")
+        window._save()
+        for setting in ("cleanup_prompt", "file_cleanup_prompt",
+                        "assistant_prompt", "meeting_prompt"):
+            with self.subTest(setting=setting):
+                self.assertEqual(conf[setting], "")
+        self.assertEqual(conf.cleanup_prompt(), cfg.CLEANUP_PROMPT_AZ)
+        # And the window shows what a dictation would now really be sent.
+        self.assertEqual(window.cleanup_prompt.toPlainText().strip(),
+                         cfg.CLEANUP_PROMPT_AZ)
+
+    def test_a_prompt_you_wrote_yourself_survives_a_language_change(self):
+        conf = cfg.Config()
+        window = self.window(conf)
+        window.cleanup_prompt.setPlainText("Only fix punctuation.")
+        window._select_data(window.language, "az")
+        window._save()
+        self.assertEqual(conf["cleanup_prompt"], "Only fix punctuation.")
+        self.assertEqual(conf.cleanup_prompt(), "Only fix punctuation.")
 
     def test_each_provider_keeps_its_own_transcription_model(self):
         self.write_config({"transcribe_provider": "openai",

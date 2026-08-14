@@ -26,6 +26,17 @@ HALLUCINATIONS = {
     "please subscribe", "subscribe to my channel", "you", "bye",
     "mbc masr", "sous titres realises par la communaute damara org",
     "amara org community", "sous titrage st 501",
+    # The Azerbaijani side of the same family. The first one is what large-v3
+    # actually returned here for ten seconds holding no speech, with the
+    # language set to Azerbaijani; the rest are the forms the stock lines above
+    # take in the same language and are here on the same footing as the rest of
+    # this list: a phrase this short, returned for a clip this short, was not
+    # dictated. "təşəkkürlər" on its own is deliberately not here, because that
+    # one is something somebody really does say.
+    "izlediyiniz ucun tesekkurler", "bizi izlediyiniz ucun tesekkurler",
+    "abune olmagi unutmayin", "kanalima abune olmagi unutmayin",
+    "izlediyiniz ucun tesekkur edirem", "izlediyiniz ucun tesekkur edirik",
+    "altyazilar",
 }
 _PUNCTUATION = re.compile(r"[^\w\s]", re.UNICODE)
 _SPACES = re.compile(r"\s+")
@@ -87,7 +98,12 @@ def is_silent(stats, silence_db=-55.0, margin_db=10.0, min_voiced_seconds=0.3):
 def _normalise(text):
     folded = unicodedata.normalize("NFKD", text.lower())
     folded = "".join(c for c in folded if not unicodedata.combining(c))
-    folded = folded.replace("ı", "i").replace("ş", "s").replace("ğ", "g")
+    # NFKD takes the accents off, but these four are letters rather than an
+    # accented vowel, so they survive it and are folded by hand. "ə" is
+    # Azerbaijani's own, and without it a stock phrase written with it never
+    # matches the list.
+    folded = (folded.replace("ı", "i").replace("ş", "s")
+                    .replace("ğ", "g").replace("ə", "e"))
     return _SPACES.sub(" ", _PUNCTUATION.sub("", folded)).strip()
 
 

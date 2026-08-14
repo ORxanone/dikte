@@ -147,6 +147,7 @@ TR = {
     "Interface language": "Arayüz dili",
     "Automatic (system)": "Otomatik (sistem)",
     "Turkish": "Türkçe",
+    "Azerbaijani": "Azerice",
     "English": "İngilizce",
     "Restart Dikte for the language change to reach every window.":
         "Dil değişikliğinin her pencereye işlemesi için Dikte'yi yeniden başlat.",

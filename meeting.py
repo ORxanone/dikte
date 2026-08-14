@@ -205,7 +205,8 @@ class MeetingPipeline(QObject):
 
     def _cleanup(self, transcript):
         conf = self.conf
-        prompt = conf.cleanup_prompt(with_timestamps=True, with_speakers=True)
+        prompt = conf.cleanup_prompt(with_timestamps=True, with_speakers=True,
+                                     meeting=True)
         out = []
         blocks = filetranscribe.split_text(transcript, True)
         for index, block in enumerate(blocks, start=1):

@@ -324,8 +324,15 @@ class ConfigCommands(DikteTest):
         self.assertEqual(paths["history"], str(cfg.HISTORY_FILE))
 
     def test_the_prompt_a_run_would_really_send(self):
+        self.write_config({"language": "en"})
         _, out, _ = self.run_cmd(cli.cmd_prompt, which="cleanup")
         self.assertEqual(out.strip(), cfg.CLEANUP_PROMPT_EN.strip())
+
+    def test_the_prompt_follows_the_dictation_language(self):
+        """What `dikte prompt` prints is what a dictation in that language gets."""
+        self.write_config({"language": "az"})
+        _, out, _ = self.run_cmd(cli.cmd_prompt, which="cleanup")
+        self.assertEqual(out.strip(), cfg.CLEANUP_PROMPT_AZ.strip())
 
     def test_all_four_prompts_at_once(self):
         _, out, _ = self.run_cmd(cli.cmd_prompt, which=None, json=True)

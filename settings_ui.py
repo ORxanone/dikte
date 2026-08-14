@@ -29,8 +29,9 @@ from i18n import t
 
 UI_LANGUAGES = [("Automatic (system)", "auto"), ("Turkish", "tr"), ("English", "en")]
 LANGUAGES = [
-    ("Detect automatically", "auto"), ("Turkish", "tr"), ("English", "en"),
-    ("German", "de"), ("French", "fr"), ("Spanish", "es"), ("Arabic", "ar"),
+    ("Detect automatically", "auto"), ("Turkish", "tr"), ("Azerbaijani", "az"),
+    ("English", "en"), ("German", "de"), ("French", "fr"), ("Spanish", "es"),
+    ("Arabic", "ar"),
 ]
 CORNERS = ["bottom-left", "bottom-right", "top-left", "top-right"]
 # The provider box offers what config knows how to reach, this machine first.
@@ -480,6 +481,12 @@ class SettingsWindow(QDialog):
         # provider back and forth never overwrites the other one's.
         self._models = dict.fromkeys(cfg.TRANSCRIBERS, "")
         self._key_fields = {}
+        # Which default text each prompt box was filled with. Saving compares
+        # against this rather than against the current default, because the
+        # speech language can be changed in this same window: the new
+        # language's default would otherwise look like an edit and be frozen
+        # into the config, and the prompt would stop following the language.
+        self._prompt_defaults = {}
         self._testers = {}
         self._shown_provider = ""
         self.transcriber = FileTranscriber(conf, self)
@@ -776,14 +783,14 @@ class SettingsWindow(QDialog):
             inner, t("Dictation"),
             t("System instruction given to the cleanup model. This is where you "
               "decide how much it may touch your words."),
-            cfg.default_cleanup_prompt,
+            lambda: cfg.default_cleanup_prompt(self._speech_language()),
         )
         self.file_cleanup_prompt = self._prompt_page(
             inner, t("Audio file"),
             t("Used instead when an audio or video file is cleaned up. It is "
               "written for subtitles: lines stay where they are, nothing is "
               "shortened, and misheard words are repaired from the context."),
-            cfg.default_file_cleanup_prompt,
+            lambda: cfg.default_file_cleanup_prompt(self._speech_language()),
         )
         layout.addWidget(inner, 1)
 
@@ -963,9 +970,9 @@ class SettingsWindow(QDialog):
         self.assistant_prompt.setMinimumHeight(180)
         layout.addWidget(self.assistant_prompt, 1)
         reset_prompt = QPushButton(t("Reset to default"))
-        reset_prompt.clicked.connect(
-            lambda: self.assistant_prompt.setPlainText(cfg.default_assistant_prompt())
-        )
+        reset_prompt.clicked.connect(lambda: self._fill_prompt(
+            self.assistant_prompt, "",
+            lambda: cfg.default_assistant_prompt(self._speech_language())))
         layout.addWidget(reset_prompt, 0, Qt.AlignmentFlag.AlignRight)
 
         area = QScrollArea()
@@ -1095,9 +1102,9 @@ class SettingsWindow(QDialog):
         self.meeting_prompt.setMinimumHeight(200)
         layout.addWidget(self.meeting_prompt, 1)
         reset = QPushButton(t("Reset to default"))
-        reset.clicked.connect(
-            lambda: self.meeting_prompt.setPlainText(cfg.default_meeting_prompt())
-        )
+        reset.clicked.connect(lambda: self._fill_prompt(
+            self.meeting_prompt, "",
+            lambda: cfg.default_meeting_prompt(self._meeting_speech_language())))
         layout.addWidget(reset, 0, Qt.AlignmentFlag.AlignRight)
 
         # Everything above is more than one screenful; let it scroll rather than
@@ -1327,8 +1334,32 @@ class SettingsWindow(QDialog):
         layout.addLayout(row)
         return page
 
-    @staticmethod
-    def _prompt_page(tabs, title, intro, default):
+    def _speech_language(self):
+        """The dictation language as the window currently shows it."""
+        return self.language.currentData() or "auto"
+
+    def _meeting_speech_language(self):
+        return self.meeting_language.currentData() or self._speech_language()
+
+    def _fill_prompt(self, box, stored, default):
+        """Show a stored prompt, or the default, and remember which default."""
+        text = default()
+        self._prompt_defaults[box] = text.strip()
+        box.setPlainText(stored or text)
+
+    def _prompt_value(self, box, default):
+        """What to store for a prompt box: "" while it is still a default.
+
+        Empty is what lets a later change of language change the prompt too, so
+        the text counts as untouched when it matches either the default it was
+        shown with or the one the language now in the window asks for.
+        """
+        text = box.toPlainText().strip()
+        if text in (self._prompt_defaults.get(box), default().strip()):
+            return ""
+        return text
+
+    def _prompt_page(self, tabs, title, intro, default):
         """A tab holding one editable prompt, and returns its box."""
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -1338,7 +1369,7 @@ class SettingsWindow(QDialog):
         box = QPlainTextEdit()
         layout.addWidget(box, 1)
         reset = QPushButton(t("Reset to default"))
-        reset.clicked.connect(lambda: box.setPlainText(default()))
+        reset.clicked.connect(lambda: self._fill_prompt(box, "", default))
         layout.addWidget(reset, 0, Qt.AlignmentFlag.AlignRight)
         tabs.addTab(page, title)
         return box
@@ -1461,10 +1492,11 @@ class SettingsWindow(QDialog):
         self.local_llm_preload.setChecked(conf["local_llm_preload"])
         self._select_data(self.local_llm_reasoning, conf["local_llm_reasoning"])
         self.local_llm.load(conf["local_llm_model"], conf["local_llm_repo"])
-        self.cleanup_prompt.setPlainText(conf["cleanup_prompt"] or cfg.default_cleanup_prompt())
-        self.file_cleanup_prompt.setPlainText(
-            conf["file_cleanup_prompt"] or cfg.default_file_cleanup_prompt()
-        )
+        self._fill_prompt(self.cleanup_prompt, conf["cleanup_prompt"],
+                          lambda: cfg.default_cleanup_prompt(self._speech_language()))
+        self._fill_prompt(
+            self.file_cleanup_prompt, conf["file_cleanup_prompt"],
+            lambda: cfg.default_file_cleanup_prompt(self._speech_language()))
         self.transcribe_prompt.setPlainText(conf["transcribe_prompt"])
 
         self._select_data(self.assistant_provider, conf["assistant_provider"])
@@ -1480,9 +1512,9 @@ class SettingsWindow(QDialog):
         self.assistant_session_minutes.setValue(int(conf["assistant_session_minutes"]))
         self.assistant_paste.setChecked(conf["assistant_paste"])
         self.assistant_cleanup.setChecked(conf["assistant_cleanup"])
-        self.assistant_prompt.setPlainText(
-            conf["assistant_prompt"] or cfg.default_assistant_prompt()
-        )
+        self._fill_prompt(
+            self.assistant_prompt, conf["assistant_prompt"],
+            lambda: cfg.default_assistant_prompt(self._speech_language()))
 
         self._select_data(self.meeting_mic, conf["meeting_mic_target"])
         self._select_data(self.meeting_system, conf["meeting_system_target"])
@@ -1495,9 +1527,9 @@ class SettingsWindow(QDialog):
         self.meeting_cleanup.setChecked(conf["meeting_cleanup"])
         self.meeting_max_minutes.setValue(max(5, int(conf["meeting_max_seconds"]) // 60))
         self.meeting_keep_audio.setChecked(conf["meeting_keep_audio"])
-        self.meeting_prompt.setPlainText(
-            conf["meeting_prompt"] or cfg.default_meeting_prompt()
-        )
+        self._fill_prompt(
+            self.meeting_prompt, conf["meeting_prompt"],
+            lambda: cfg.default_meeting_prompt(self._meeting_speech_language()))
 
         self.file_timestamps.setChecked(conf["file_timestamps"])
         self.file_cleanup.setChecked(conf["file_cleanup"])
@@ -1560,11 +1592,12 @@ class SettingsWindow(QDialog):
 
         # Store an empty prompt when it matches the default, so switching the
         # interface language also switches the prompt language.
-        prompt = self.cleanup_prompt.toPlainText().strip()
-        conf["cleanup_prompt"] = "" if prompt == cfg.default_cleanup_prompt() else prompt
-        file_prompt = self.file_cleanup_prompt.toPlainText().strip()
-        conf["file_cleanup_prompt"] = ("" if file_prompt == cfg.default_file_cleanup_prompt()
-                                       else file_prompt)
+        conf["cleanup_prompt"] = self._prompt_value(
+            self.cleanup_prompt,
+            lambda: cfg.default_cleanup_prompt(self._speech_language()))
+        conf["file_cleanup_prompt"] = self._prompt_value(
+            self.file_cleanup_prompt,
+            lambda: cfg.default_file_cleanup_prompt(self._speech_language()))
         conf["transcribe_prompt"] = self.transcribe_prompt.toPlainText().strip()
 
         conf["assistant_provider"] = self.assistant_provider.currentData() or "claude"
@@ -1590,9 +1623,9 @@ class SettingsWindow(QDialog):
         conf["assistant_session_minutes"] = self.assistant_session_minutes.value()
         conf["assistant_paste"] = self.assistant_paste.isChecked()
         conf["assistant_cleanup"] = self.assistant_cleanup.isChecked()
-        assistant_prompt = self.assistant_prompt.toPlainText().strip()
-        conf["assistant_prompt"] = ("" if assistant_prompt == cfg.default_assistant_prompt()
-                                    else assistant_prompt)
+        conf["assistant_prompt"] = self._prompt_value(
+            self.assistant_prompt,
+            lambda: cfg.default_assistant_prompt(self._speech_language()))
 
         conf["meeting_mic_target"] = self.meeting_mic.currentData() or ""
         conf["meeting_system_target"] = self.meeting_system.currentData() or ""
@@ -1606,9 +1639,9 @@ class SettingsWindow(QDialog):
         conf["meeting_cleanup"] = self.meeting_cleanup.isChecked()
         conf["meeting_max_seconds"] = self.meeting_max_minutes.value() * 60
         conf["meeting_keep_audio"] = self.meeting_keep_audio.isChecked()
-        meeting_prompt = self.meeting_prompt.toPlainText().strip()
-        conf["meeting_prompt"] = ("" if meeting_prompt == cfg.default_meeting_prompt()
-                                  else meeting_prompt)
+        conf["meeting_prompt"] = self._prompt_value(
+            self.meeting_prompt,
+            lambda: cfg.default_meeting_prompt(self._meeting_speech_language()))
 
         conf["file_timestamps"] = self.file_timestamps.isChecked()
         conf["file_cleanup"] = self.file_cleanup.isChecked()
@@ -1622,6 +1655,10 @@ class SettingsWindow(QDialog):
         conf["evdev_hotkey"] = self.evdev_enabled.isChecked()
         conf["history_limit"] = self.history_limit.value()
         conf.save()
+        # The prompt boxes still hold the language they were filled with, and
+        # the one just saved may be another; refill the ones that are still a
+        # default so the window shows what will actually be sent.
+        self._reload_default_prompts()
         # A lowered limit should bite now, not on the next dictation.
         try:
             cfg.trim_history(conf["history_limit"])
@@ -1630,6 +1667,22 @@ class SettingsWindow(QDialog):
         self._load_history()  # the trim may just have dropped rows from the list
         self.applied.emit()
         QMessageBox.information(self, t("Dikte Settings"), t("Saved successfully."))
+
+    def _reload_default_prompts(self):
+        """Put the current language's default back in every untouched box."""
+        conf = self.conf
+        for box, setting, default in (
+            (self.cleanup_prompt, "cleanup_prompt",
+             lambda: cfg.default_cleanup_prompt(self._speech_language())),
+            (self.file_cleanup_prompt, "file_cleanup_prompt",
+             lambda: cfg.default_file_cleanup_prompt(self._speech_language())),
+            (self.assistant_prompt, "assistant_prompt",
+             lambda: cfg.default_assistant_prompt(self._speech_language())),
+            (self.meeting_prompt, "meeting_prompt",
+             lambda: cfg.default_meeting_prompt(self._meeting_speech_language())),
+        ):
+            if not conf[setting]:
+                self._fill_prompt(box, "", default)
 
     @staticmethod
     def _select_data(combo, value):

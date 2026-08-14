@@ -137,6 +137,33 @@ class Hallucinations(DikteTest):
             with self.subTest(text=text):
                 self.assertTrue(vad.looks_like_hallucination(text, 2.0))
 
+    def test_matching_ignores_the_azerbaijani_schwa(self):
+        """NFKD leaves "ə" alone, so without a fold of its own an Azerbaijani
+        stock line never reaches the list it is written in."""
+        self.assertEqual(vad._normalise("Abunə olmağı unutmayın"),
+                         "abune olmagi unutmayin")
+        self.assertEqual(vad._normalise("TƏŞƏKKÜR"), "tesekkur")
+        for text in ("Abunə olmağı unutmayın",
+                     "İzlədiyiniz üçün təşəkkür edirik.",
+                     "Kanalıma abunə olmağı unutmayın!",
+                     # Measured: what large-v3-q5_0 returned for ten seconds of
+                     # no speech with the language set to Azerbaijani.
+                     "İzlədiyiniz üçün təşəkkürlər."):
+            with self.subTest(text=text):
+                self.assertTrue(vad.looks_like_hallucination(text, 2.0))
+
+    def test_azerbaijani_speech_is_kept(self):
+        """The fold must not swallow a real dictation: "də" and "təşəkkür"
+        appear in ordinary sentences too."""
+        for text in ("Mən də sabah gələcəyəm.",
+                     "Təşəkkür edirəm, sənədi göndərdim.",
+                     # A word away from the stock line above, and a real thing
+                     # to dictate; the list must not be widened to swallow it.
+                     "Təşəkkürlər.",
+                     "Bu gün Kubernetes üzərində işlədim."):
+            with self.subTest(text=text):
+                self.assertFalse(vad.looks_like_hallucination(text, 2.0))
+
     def test_the_boundary_is_the_max_duration(self):
         self.assertTrue(vad.looks_like_hallucination("you", 6.0))
         self.assertFalse(vad.looks_like_hallucination("you", 6.1))

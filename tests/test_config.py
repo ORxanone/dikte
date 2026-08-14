@@ -183,12 +183,44 @@ class TranscribeTarget(DikteTest):
 
 
 class CleanupPrompt(DikteTest):
-    def test_the_default_follows_the_interface_language(self):
-        self.assertEqual(cfg.Config().cleanup_prompt(), cfg.CLEANUP_PROMPT_EN)
+    def test_the_default_follows_the_spoken_language(self):
+        """The prompt describes the transcript, so what was spoken picks it.
+
+        Azerbaijani dictated under an English interface still has to be told
+        that "də" is a particle and not a filler word, and the interface is no
+        help there.
+        """
+        self.assertEqual(self.config(language="en").cleanup_prompt(),
+                         cfg.CLEANUP_PROMPT_EN)
+        self.assertEqual(self.config(language="tr").cleanup_prompt(),
+                         cfg.CLEANUP_PROMPT_TR)
+        self.assertEqual(self.config(language="az").cleanup_prompt(),
+                         cfg.CLEANUP_PROMPT_AZ)
+
+    def test_a_language_with_no_prompt_of_its_own_gets_the_english_one(self):
+        """It is the one that does not name a filler list of its own, and the
+        instruction not to translate is what keeps the transcript in place."""
+        for language in ("de", "fr", "es", "ar"):
+            with self.subTest(language=language):
+                self.assertEqual(self.config(language=language).cleanup_prompt(),
+                                 cfg.CLEANUP_PROMPT_EN)
+
+    def test_auto_is_the_one_case_the_interface_decides(self):
         # Building a Config applies the stored language, so it is set there
         # rather than around it.
-        self.write_config({"ui_language": "tr"})
+        self.write_config({"ui_language": "en", "language": "auto"})
+        self.assertEqual(cfg.Config().cleanup_prompt(), cfg.CLEANUP_PROMPT_EN)
+        self.write_config({"ui_language": "tr", "language": "auto"})
         self.assertEqual(cfg.Config().cleanup_prompt(), cfg.CLEANUP_PROMPT_TR)
+
+    def test_the_azerbaijani_prompt_protects_the_grammatical_particle(self):
+        """The Turkish prompt lists "yani" and "işte" as fillers to delete, and
+        the same sweep over Azerbaijani would take "də" with it, which carries
+        meaning. Losing this rule is a silent quality regression, so it is
+        pinned here."""
+        prompt = self.config(language="az").cleanup_prompt()
+        self.assertIn('"də"/"da"', prompt)
+        self.assertIn("qrammatik ədat", prompt)
 
     def test_a_prompt_of_your_own(self):
         conf = self.config(cleanup_prompt="  Only fix punctuation.  ")
@@ -199,16 +231,19 @@ class CleanupPrompt(DikteTest):
         self.assertIn("Paraşüt, OpenFrame", conf.cleanup_prompt())
 
     def test_no_glossary_means_no_rule_about_one(self):
-        self.assertEqual(cfg.Config().cleanup_prompt(), cfg.CLEANUP_PROMPT_EN)
+        self.assertEqual(self.config(language="en").cleanup_prompt(),
+                         cfg.CLEANUP_PROMPT_EN)
 
     def test_subtitles_use_their_own_prompt(self):
-        conf = cfg.Config()
+        conf = self.config(language="en")
         self.assertNotEqual(conf.cleanup_prompt(subtitles=True), conf.cleanup_prompt())
         self.assertEqual(conf.cleanup_prompt(subtitles=True),
                          cfg.FILE_CLEANUP_PROMPT_EN)
+        self.assertEqual(self.config(language="az").cleanup_prompt(subtitles=True),
+                         cfg.FILE_CLEANUP_PROMPT_AZ)
 
     def test_a_subtitle_prompt_of_your_own(self):
-        conf = self.config(file_cleanup_prompt="Keep the stamps.")
+        conf = self.config(file_cleanup_prompt="Keep the stamps.", language="en")
         self.assertEqual(conf.cleanup_prompt(subtitles=True), "Keep the stamps.")
         self.assertEqual(conf.cleanup_prompt(), cfg.CLEANUP_PROMPT_EN)
 
@@ -222,6 +257,55 @@ class CleanupPrompt(DikteTest):
         prompt = conf.cleanup_prompt(with_speakers=True)
         self.assertIn("Yusuf", prompt)
         self.assertIn("Ayşe", prompt)
+
+
+class PromptTables(unittest.TestCase):
+    """The tables the prompt language is looked up in, against each other.
+
+    A prompt added to the English and Turkish tables and forgotten in the
+    Azerbaijani one raises KeyError on the first dictation in that language,
+    which is a place nobody is watching a terminal.
+    """
+
+    TABLES = ("CLEANUP_PROMPTS", "FILE_CLEANUP_PROMPTS", "MEETING_PROMPTS",
+              "ASSISTANT_PROMPTS", "GLOSSARY_RULES", "TIMESTAMP_RULES",
+              "SPEAKER_RULES", "PARTICIPANTS_RULES", "SPEAKER_DEFAULT_NAMES")
+
+    def test_every_table_covers_every_language(self):
+        for name in self.TABLES:
+            with self.subTest(table=name):
+                self.assertEqual(set(getattr(cfg, name)),
+                                 set(cfg.PROMPT_LANGUAGES))
+
+    def test_no_two_languages_were_handed_the_same_text(self):
+        """A row filled in by copying the English one reads as translated and
+        is not; nothing else in the suite would notice."""
+        for name in self.TABLES:
+            table = getattr(cfg, name)
+            with self.subTest(table=name):
+                self.assertEqual(len({str(v) for v in table.values()}),
+                                 len(table))
+
+    def test_nothing_is_empty(self):
+        for name in self.TABLES:
+            for language, value in getattr(cfg, name).items():
+                with self.subTest(table=name, language=language):
+                    self.assertTrue(str(value).strip())
+
+    def test_the_rules_that_take_an_argument_keep_it(self):
+        for name, field in (("GLOSSARY_RULES", "glossary"),
+                            ("PARTICIPANTS_RULES", "participants")):
+            for language, rule in getattr(cfg, name).items():
+                with self.subTest(table=name, language=language):
+                    self.assertIn("{" + field + "}", rule)
+                    rule.format(**{field: "x"})
+
+    def test_the_resolver_only_names_a_language_the_tables_have(self):
+        for speech in ("az", "tr", "en", "de", "fr", "es", "ar", "auto",
+                       "", "  AZ  ", "xx", "az-Latn"):
+            with self.subTest(speech=speech):
+                self.assertIn(cfg.resolve_prompt_language(speech),
+                              cfg.PROMPT_LANGUAGES)
 
 
 class Participants(DikteTest):
@@ -257,9 +341,23 @@ class MeetingSettings(DikteTest):
         self.assertEqual(cfg.Config().meeting_hint(), "")
 
     def test_the_speaker_labels_fall_back_to_the_language(self):
-        self.assertEqual(cfg.Config().speaker_names(), ("Me", "Other side"))
-        self.write_config({"ui_language": "tr"})
-        self.assertEqual(cfg.Config().speaker_names(), ("Ben", "Karşı taraf"))
+        self.assertEqual(self.config(language="en").speaker_names(),
+                         ("Me", "Other side"))
+        self.assertEqual(self.config(language="tr").speaker_names(),
+                         ("Ben", "Karşı taraf"))
+        self.assertEqual(self.config(language="az").speaker_names(),
+                         ("Mən", "Qarşı tərəf"))
+
+    def test_the_meeting_language_outranks_the_dictation_one(self):
+        """A meeting held in another language than the one usually dictated in
+        takes its prompt, its rules and its speaker labels from the meeting."""
+        conf = self.config(language="tr", meeting_language="az")
+        self.assertEqual(conf.speaker_names(), ("Mən", "Qarşı tərəf"))
+        self.assertEqual(conf.meeting_prompt(), cfg.MEETING_PROMPT_AZ)
+        self.assertIn(cfg.SPEAKER_RULE_AZ,
+                      conf.cleanup_prompt(with_speakers=True, meeting=True))
+        # The dictation is not the meeting, and keeps its own language.
+        self.assertEqual(conf.cleanup_prompt(), cfg.CLEANUP_PROMPT_TR)
 
     def test_named_speakers_are_used_as_given(self):
         conf = self.config(meeting_self_name="Yusuf", meeting_other_name="Ayşe")
@@ -270,7 +368,8 @@ class MeetingSettings(DikteTest):
         self.assertIn("Yusuf", conf.meeting_prompt())
 
     def test_the_meeting_prompt_with_nobody_named(self):
-        self.assertEqual(cfg.Config().meeting_prompt(), cfg.MEETING_PROMPT_EN)
+        self.assertEqual(self.config(language="en").meeting_prompt(),
+                         cfg.MEETING_PROMPT_EN)
 
 
 class History(DikteTest):

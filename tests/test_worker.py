@@ -121,6 +121,16 @@ class Chain(DikteTest):
         self.assertEqual(run["transcribe"].call_args.kwargs["language"], "tr")
         self.assertEqual(run["transcribe"].call_args.kwargs["prompt"], "Paraşüt")
 
+    def test_an_azerbaijani_dictation_is_cleaned_up_in_azerbaijani(self):
+        """The whole chain in one language: the code reaches the transcription
+        model, and the prompt that reaches the cleanup model is the one written
+        for that language rather than the interface's."""
+        self.conf["language"] = "az"
+        run = self.run_chain()
+        self.assertEqual(run["transcribe"].call_args.kwargs["language"], "az")
+        sent = " ".join(str(x) for x in run["cleanup"].call_args.args)
+        self.assertIn(cfg.CLEANUP_PROMPT_AZ, sent)
+
     # ---- silence and stock phrases ----------------------------------------
 
     def test_room_tone_costs_no_api_call(self):
