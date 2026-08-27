@@ -85,15 +85,27 @@ class IsSilent(unittest.TestCase):
         self.assertGreater(stats["speech_db"], -55.0)
         self.assertTrue(vad.is_silent(stats))
 
-    def test_a_level_that_never_moves_is_never_speech_however_loud(self):
+    def test_a_flat_recording_is_settled_by_its_absolute_level(self):
         """The floor is the whole recording, so nothing can rise above it.
 
-        This is what settles a flat recording, at any volume: the margin rule
-        gets there before the dynamics rule ever does.
+        Which leaves the relative test with nothing to say, at any volume: a
+        loud flat recording is a voice that never paused, a quiet one is a fan.
         """
-        stats = vad.analyse([0.25] * 60, CHUNK)
-        self.assertEqual(stats["voiced_seconds"], 0.0)
-        self.assertTrue(vad.is_silent(stats))
+        loud = vad.analyse([0.25] * 60, CHUNK)
+        self.assertEqual(loud["voiced_seconds"], 0.0)
+        self.assertFalse(vad.is_silent(loud))
+
+        quiet = vad.analyse([0.0025] * 60, CHUNK)
+        self.assertEqual(quiet["voiced_seconds"], 0.0)
+        self.assertTrue(vad.is_silent(quiet))
+
+    def test_a_dictation_spoken_without_a_pause(self):
+        """Measured, from a recording this rejected: 39 s of Azerbaijani at
+        -23 dB through a microphone whose DSP compresses it, which leaves a
+        tenth percentile of -26 dB and no chunk anywhere near 10 dB above it."""
+        stats = {"speech_db": -23.39, "noise_db": -26.09,
+                 "dynamic_db": 2.70, "voiced_seconds": 0.0}
+        self.assertFalse(vad.is_silent(stats))
 
     def test_flat_dynamics_alone_do_not_reject_a_loud_recording(self):
         stats = {"speech_db": -20.0, "noise_db": -24.0,

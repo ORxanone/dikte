@@ -79,18 +79,18 @@ def analyse(rms_values, chunk_seconds, margin_db=10.0):
 def is_silent(stats, silence_db=-55.0, margin_db=10.0, min_voiced_seconds=0.3):
     """True when the recording holds no speech worth sending to the API.
 
-    Three independent reasons, any one of which is enough:
-      * the loud end of the recording is below the absolute floor
-      * nothing rose far enough above the noise floor for long enough
-      * the level never moved, meaning steady hiss, hum or fan noise
+    The loud end below the absolute floor settles it on its own. Past that the
+    relative test decides, but only where there is a floor to measure against:
+    a dictation spoken without pause is speech all the way down to its tenth
+    percentile, and one of a fan is hiss all the way down to its own. Nothing
+    in either rose the margin above it, so that number is not a noise floor and
+    the relative test cannot tell the two apart. The absolute level can.
     """
     if stats["speech_db"] < silence_db:
         return True
+    if stats["dynamic_db"] < margin_db:
+        return stats["speech_db"] < silence_db + 12
     if stats["voiced_seconds"] < min_voiced_seconds:
-        return True
-    # Only distrust flat dynamics near the floor; a loud, evenly-spoken
-    # sentence legitimately has a narrow range.
-    if stats["speech_db"] < silence_db + 12 and stats["dynamic_db"] < margin_db * 0.6:
         return True
     return False
 
