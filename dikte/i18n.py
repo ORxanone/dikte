@@ -161,6 +161,8 @@ TR = {
         "{service} hesapta kredi kalmadığını söylüyor (HTTP 402).",
     "{service} is rate limiting you (HTTP 429). Try again in a moment.":
         "{service} hız sınırı uyguluyor (HTTP 429). Birazdan tekrar dene.",
+    "{error} Retrying in {seconds} s ({attempt}/{total})…":
+        "{error} {seconds} sn sonra yeniden deneniyor ({attempt}/{total})…",
     "The {desktop} shortcut is live now, so the built-in listener has "
     "been turned off. It was doubling every key press.":
         "{desktop} kısayolu artık çalışıyor, bu yüzden dahili dinleyici kapatıldı. "
