@@ -28,6 +28,14 @@ from .i18n import t
 
 CHUNK_SECONDS = audio.CHUNK_FRAMES / audio.RATE
 
+# A dictation is speech the user has already said and cannot say again, and the
+# failure a second try fixes most often is a rate limit whose window is a
+# minute or less. So the transcription request climbs this ladder: a wait after
+# each retryable failure, the waits growing from ten seconds to two minutes,
+# five attempts in all. A run that climbs off the end fails as before, its
+# audio kept.
+RETRY_WAITS = (10, 30, 60, 120)
+
 # A dictation and a command to the agent run side by side and can finish at the
 # same moment. Pasting is not one step but three that must not interleave: read
 # what is on the clipboard, put ours there, press the key. Two runs doing that
@@ -93,11 +101,42 @@ class Pipeline(QObject):
     def cancel(self):
         """Give up on a job already under way.
 
-        Only the Claude call can honour this, and it is the only one long enough
-        to be worth interrupting: a transcription is over in seconds, a command
-        that went looking through the web is not.
+        The two things long enough to be worth interrupting honour it: a
+        Claude call mid-answer, and the wait between two tries of a failing
+        transcription. Everything else in the chain is over in seconds.
         """
         self._stop.set()
+
+    def _transcribe(self, call, stage):
+        """`call`, asked again on the ladder when what failed was the moment,
+        not the request.
+
+        A rate limit or a dropped connection says the request was fine and the
+        minute was bad, so asking again after a wait beats failing a run whose
+        speech the user cannot repeat. The line the user is watching says what
+        went wrong and how long the next wait is, and the stage line comes back
+        once the wait is over, so a silent minute never looks hung. A stop
+        landing mid-wait ends the run with the reason it was retrying;
+        anything the ladder cannot fix, or a run past its last wait, raises as
+        before and is handled one level up.
+        """
+        waits = RETRY_WAITS + (None,)  # the last failure has nothing to wait for
+        for attempt, wait in enumerate(waits):
+            try:
+                return call()
+            except api.ApiError as exc:
+                if wait is None or not exc.retryable:
+                    raise
+                self.stage.emit(t(
+                    "{error} Retrying in {seconds} s ({attempt}/{total})…",
+                    error=exc, seconds=wait, attempt=attempt + 2,
+                    total=len(waits)))
+                # The wait itself is where a stop lands: the event answers
+                # True the moment cancel() arrives, and the run ends with the
+                # error it was waiting out, its audio kept, not another ask.
+                if self._stop.wait(wait):
+                    raise
+                self.stage.emit(stage)
 
     def _work(self, wav_path, duration, rms_values, ask, paste_override=None,
               focus=None):
@@ -118,24 +157,30 @@ class Pipeline(QObject):
                 return
 
         try:
-            self.stage.emit(t("Transcribing…"))
+            stage = t("Transcribing…")
+            self.stage.emit(stage)
             target = conf.transcribe_target()
             # The spoken language is only knowable after the fact, and only the
             # local server says what it heard: auto mode asks it there, and
             # every other run (a fixed language, or a hosted provider that
             # detects but stays silent) transcribes as before.
             auto = conf["language"] == "auto"
+            # Read once, at the start the run: a retry asks the same request
+            # again, not whatever the settings have drifted to since.
+            language, prompt = conf["language"], conf["transcribe_prompt"]
             if auto:
-                raw, detected = api.transcribe_detected(
-                    target, wav_path, language=conf["language"],
-                    prompt=conf["transcribe_prompt"],
+                raw, detected = self._transcribe(
+                    lambda: api.transcribe_detected(
+                        target, wav_path, language=language, prompt=prompt,
+                    ),
+                    stage,
                 )
             else:
-                raw = api.transcribe(
-                    target,
-                    wav_path,
-                    language=conf["language"],
-                    prompt=conf["transcribe_prompt"],
+                raw = self._transcribe(
+                    lambda: api.transcribe(
+                        target, wav_path, language=language, prompt=prompt,
+                    ),
+                    stage,
                 )
                 detected = ""
 
