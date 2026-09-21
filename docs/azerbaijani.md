@@ -36,7 +36,7 @@ not *mən gəldim*. The Azerbaijani prompt lists Azerbaijani filler (`yəni`,
 It also carries one repair the other prompts do not: transcription models
 frequently write Azerbaijani in Turkish orthography (`çok`, `değil`, `olacak`),
 and the prompt asks for those to be brought back to the Azerbaijani norm
-(`çox`, `deyil`, `olacaq`). This is a spelling correction only — the prompt is
+(`çox`, `deyil`, `olacaq`). This is a spelling correction only: the prompt is
 explicit that a word must not be swapped for another one, and that the text must
 not be translated.
 
@@ -52,7 +52,7 @@ model sizes is much larger than it is for Turkish. Measured on FLEURS-az
 | MMS-1B (azj-latin) | 23.8% | 28.3% |
 | Whisper medium | 34.3% | 42.1% |
 | Whisper small | 51.7% | 62.8% |
-| Whisper base | 82.1% | — |
+| Whisper base | 82.1% | n/a |
 
 Source: <https://github.com/mammadovziya/whisper-az>
 
@@ -62,7 +62,7 @@ Two things follow from that table.
 because it is the right default for the languages Dikte was written for. Turbo
 keeps large-v3's encoder but cuts the decoder from 32 layers to 4, and OpenAI's
 own comparison for it covers only the languages where large-v3 scored 20% error
-or lower — Azerbaijani, at 21.7%, is outside that set and was never published.
+or lower. Azerbaijani, at 21.7%, is outside that set and was never published.
 Pick `ggml-large-v3.bin` under Settings → API and models, or send the audio to
 Groq (`whisper-large-v3`) or OpenAI (`gpt-4o-transcribe`) instead.
 
@@ -102,7 +102,7 @@ rate makes it not worth the wait it saves.
 
 **Do not leave the language on `Detect automatically`.** Whisper routinely
 detects Azerbaijani speech as Turkish, which is the failure the benchmark above
-calls out by name. Naming the language is what stops it — and naming it is not
+calls out by name. Naming the language is what stops it, and naming it is not
 always enough, which is the next section.
 
 ## On Windows
@@ -121,10 +121,6 @@ check. What differs is around them.
   twice as fast as the stock one by `README.windows.md`, but it has not been
   measured with `large-v3` here; Groq, OpenAI or OpenRouter is the way to it
   that does not depend on the machine.
-- **Install this branch from a checkout**, with `install.ps1`. The setup on
-  upstream's releases page is built without Azerbaijani, and installing it
-  replaces this one. The update notice looks at this fork for that reason
-  (`REPO` in `dikte/update.py`).
 
 ## Whisper is not the best model here
 
@@ -140,7 +136,7 @@ land but whether the model stays in Azerbaijani at all:
 | `google/chirp-3` | 5/6 | 2/6, fully | 3.7 s |
 | `openai/whisper-large-v3` | 2/6 | 2/6, partly | 2.7 s |
 | `openai/gpt-4o-mini-transcribe` | 1/6 | 0/6 | 1.3 s |
-| `openai/whisper-large-v3-turbo` | 0/6 | — | 2.3 s |
+| `openai/whisper-large-v3-turbo` | 0/6 | n/a | 2.3 s |
 
 `chirp-3` hears the words best and is still the wrong choice: twice it returned
 the sentence in Turkish outright, down to the Turkish apostrophe in
@@ -154,7 +150,7 @@ to the request Dikte sends, and are not usable from here at all.
 
 `api.py` deliberately drops the `prompt` field for OpenRouter, and a measurement
 confirms the comment is still true: eighteen requests with the hint and eighteen
-without recognised "Kubernetes" 9 times each and "Grafana" 12 times each —
+without recognised "Kubernetes" 9 times each and "Grafana" 12 times each:
 identical. On Azerbaijani, where proper nouns are the dominant failure, that is
 the one hint worth having, so a glossary that has to reach the transcription
 model means going to OpenAI or Groq directly rather than through OpenRouter.
@@ -166,6 +162,6 @@ Even at its best, a 21.7% word error rate is roughly two to three times the rate
 Whisper large-v3 reaches on Turkish. No prompt fixes that: the cleanup model can
 repair a word the context settles, but it cannot recover one that was never
 heard. The glossary under **Settings → Cleanup rules** is the one lever that
-helps measurably — the names and terms listed there go to the transcription
+helps measurably: the names and terms listed there go to the transcription
 model as a hint and to the cleanup model as a spelling list, which is where most
 of the remaining errors are.

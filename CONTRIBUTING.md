@@ -42,9 +42,11 @@ and `FileTranscriber` emit from the thread `start()` spawned, which Qt queues
 until an event loop runs one. Call `_work()` directly instead: it is the same
 code one frame down, and the signals arrive at once.
 
-**A level that never moves is not speech.** The silence check is relative, so a
-steady tone reads as its own noise floor however loud it is. Use `speech()`
-rather than `tone()` when a recording is meant to have somebody talking in it.
+**A level that never moves is judged by its loudness alone.** The silence check
+is relative, and a steady tone has no floor to rise above, so it falls back to
+the absolute level: below `silence_db + 12` it is silence, above it speech,
+because a voice that never pauses looks just as flat. Use `speech()` rather
+than `tone()` when a recording is meant to have somebody talking in it.
 
 **`cli.launch_gui` replaces the process.** With no instance running, some verbs
 `os.execv` into the application, which would take the test run with it. Patch

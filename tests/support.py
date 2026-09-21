@@ -266,9 +266,9 @@ def silence(seconds, rate=16000, channels=1):
 def speech(seconds, rate=16000, amplitude=16000, freq=440.0):
     """A buffer the silence check reads as somebody talking.
 
-    A steady tone does not, however loud it is: the check is relative, and a
-    level that never moves is its own noise floor. Speech is quiet, then loud,
-    which is what the pauses between words make it.
+    Quiet, then loud, which is what the pauses between words make speech, and
+    what the relative check is built for. A steady tone is judged on its level
+    alone, so whether it passes depends on the amplitude rather than the shape.
     """
     half = seconds / 2
     return silence(half, rate) + tone(half, rate, amplitude, freq=freq)
