@@ -70,11 +70,9 @@ class Asking(DikteTest):
             release = update.latest()
         self.assertEqual(release.version, "1.4.0")
         self.assertEqual(release.url, RELEASE["html_url"])
-        # The fork, which is the only place the Azerbaijani support is
-        # published; upstream's setup would install over it without it.
         self.assertEqual(
             calls[0].full_url,
-            "https://api.github.com/repos/ORxanone/dikte/releases/latest")
+            "https://api.github.com/repos/yusufipk/dikte/releases/latest")
 
     def test_a_release_with_no_page_falls_back_to_the_redirect(self):
         with fake_urlopen({"tag_name": "v1.4.0"}):
@@ -146,25 +144,6 @@ class Remembering(DikteTest):
         found and then installed must not still be waiting afterwards."""
         update._store(version="1.4.0")
         self.patch_attr(update, "__version__", "1.4.0")
-        self.assertIsNone(update.pending())
-
-    def test_a_result_from_another_repository_is_never_pending(self):
-        """What a build pointed at upstream wrote down must not send this one
-        to upstream's page: the state file outlives the build that wrote it."""
-        upstream = {"checked": time.time(), "version": "9.9.9",
-                    "url": "https://github.com/yusufipk/dikte/releases/tag/v9.9.9"}
-        update._store(**upstream)                        # written before "repo"
-        self.assertIsNone(update.pending())
-        update._store(repo="yusufipk/dikte")
-        self.assertIsNone(update.pending())
-
-    def test_a_check_that_finds_nothing_keeps_an_old_answer_hidden(self):
-        """The fork may have no release at all. The check then fails, nothing
-        is written, and whatever upstream's check once found stays unshown."""
-        update._store(checked=0, version="9.9.9")
-        with fake_urlopen({"message": "Not Found"}):
-            with self.assertRaises(hub.HubError):
-                update.check()
         self.assertIsNone(update.pending())
 
     def test_a_version_is_announced_once(self):

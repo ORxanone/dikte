@@ -31,10 +31,7 @@ from . import __version__
 from . import hub
 from . import paths
 
-# This fork, not upstream: the Azerbaijani support lives only here, and the
-# page this points at is where somebody goes to install the next version. The
-# setup published upstream would install over this one without it.
-REPO = "ORxanone/dikte"
+REPO = "yusufipk/dikte"
 # Where somebody is sent. GitHub redirects this to whatever the newest release
 # is, so it stays right without anybody writing a number into it.
 RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
@@ -114,7 +111,7 @@ def latest(refresh=False):
 def remember(release):
     """Write down that a check has just happened, and what it found."""
     _store(checked=time.time(), version=release.version, url=release.url,
-           published=release.published, repo=REPO)
+           published=release.published)
 
 
 def pending():
@@ -125,10 +122,6 @@ def pending():
     time for.
     """
     stored = state()
-    # A state file written while REPO named another repository describes that
-    # one's releases, and its page is not where this build should send anybody.
-    if stored.get("repo") != REPO:
-        return None
     version = stored.get("version") or ""
     if not newer(version):
         return None
