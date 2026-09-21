@@ -66,11 +66,22 @@ or lower — Azerbaijani, at 21.7%, is outside that set and was never published.
 Pick `ggml-large-v3.bin` under Settings → API and models, or send the audio to
 Groq (`whisper-large-v3`) or OpenAI (`gpt-4o-transcribe`) instead.
 
-**On Linux, check whether the machine can carry `large-v3` at all before
-committing to it.** whisper.cpp publishes no GPU build for Linux — release
-v1.9.2 ships `whisper-bin-ubuntu-x64.tar.gz` and nothing else for x64, and
-`_wanted_assets` in `ggml.py` only looks for a Vulkan archive on behalf of
-llama.cpp — so transcription here is CPU-only whatever the graphics card is.
+**Check whether the machine can carry `large-v3` at all before committing
+to it.** Which build of whisper runs is decided by `_wanted_assets` and
+`_managed_whisper` in `dikte/ggml.py`:
+
+- **Linux x86_64 with a Vulkan loader:** a Vulkan whisper-server Dikte builds
+  itself (release `whisper.cpp-v1.9.3`, taken only when its SHA-256 is the
+  reviewed one), so the graphics card does the work. Without a Vulkan loader,
+  on ARM, or when that download is not there, it is whisper.cpp's CPU build.
+- **Windows:** always the CPU. The OpenBLAS build `whisper-blas-bin-x64.zip`
+  first, the stock `whisper-bin-x64.zip` after it; the CUDA archives are never
+  picked, whatever the graphics card, and an ARM machine runs the x64 build
+  emulated.
+
+The measurement below was taken on Linux with the CPU build, before the
+Vulkan one existed, so it describes a Linux machine left on the CPU. Windows
+runs the OpenBLAS build instead, which has not been measured here.
 Measured on an i7-1165G7 (4 cores, 15 W) with `ggml-large-v3-q5_0.bin` and the
 icelake CPU backend:
 
@@ -93,6 +104,27 @@ rate makes it not worth the wait it saves.
 detects Azerbaijani speech as Turkish, which is the failure the benchmark above
 calls out by name. Naming the language is what stops it — and naming it is not
 always enough, which is the next section.
+
+## On Windows
+
+Everything above holds there too: the language list, the prompts, the silence
+check. What differs is around them.
+
+- **The settings start empty.** They live in `%APPDATA%\Dikte`, models and
+  recordings in `%LOCALAPPDATA%\Dikte`, so nothing set on Linux comes along:
+  pick Azerbaijani, the provider and its key again.
+- **Pick the microphone by name.** Windows records through ffmpeg's dshow,
+  which has no default device; with the setting left empty Dikte takes the
+  first one ffmpeg lists (`_dshow_first_device` in `dikte/audio.py`), and a
+  headset's is not necessarily that one. `dikte devices` lists them.
+- **Local whisper runs on the CPU** (see above). The OpenBLAS build is about
+  twice as fast as the stock one by `README.windows.md`, but it has not been
+  measured with `large-v3` here; Groq, OpenAI or OpenRouter is the way to it
+  that does not depend on the machine.
+- **Install this branch from a checkout**, with `install.ps1`. The setup on
+  upstream's releases page is built without Azerbaijani, and installing it
+  replaces this one. The update notice looks at this fork for that reason
+  (`REPO` in `dikte/update.py`).
 
 ## Whisper is not the best model here
 
