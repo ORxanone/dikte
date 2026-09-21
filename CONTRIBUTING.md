@@ -53,19 +53,28 @@ forgets fails rather than hangs.
 
 ## Another platform
 
-Three systems are supported: Wayland, X11 and macOS. Each one is a named entry
-in a table, and one chooser picks between them, so a fourth adds an entry and a
-line rather than a branch inside every function. The three tables are
-`paste.Desktop` (clipboard and key press), `audio.Sound` (capture and the device
-lists) and the `_macos()`/`_gnome()` pair in `hotkey.py`. Keep `sys.platform`
+Four systems are supported: Wayland, X11, macOS and Windows. Each one is a named
+entry in a table, and one chooser picks between them, so a fifth adds an entry
+and a line rather than a branch inside every function. The tables are
+`paste.Desktop` (clipboard and key press), `audio.Sound` (capture, the device
+lists, and whether the far side of a meeting can be recorded at all),
+`paths.directories()` (where the settings and the data live) and `hotkey.backend()`,
+which names the one mechanism a session has for holding a key. Keep `sys.platform`
 inside the chooser and read it there every time: a constant settled at import is
 one no test can stand somewhere else.
 
+Where a platform cannot do something, say so in its table entry rather than in
+the code that asks. `audio.Sound.meetings` is the shape of it: Windows offers no
+capture device for what the speakers are playing, and a caller reading a False
+there can tell that apart from an empty device list, which only means the tool
+that lists them is not installed.
+
 The tests are split along the same line, and almost none of them are skipped.
-892 of the 935 run on any machine, including every line of the Wayland, X11 and
-macOS backends: the programs are faked at `shutil.which`, the frameworks at the
-one function that loads them. A test class says which system it is standing on
-rather than avoiding the question:
+1096 of the 1159 run on any machine, including every line of the Wayland, X11,
+macOS and Windows backends: the programs are faked at `shutil.which`, the
+frameworks and system libraries at the one function that loads them
+(`paste._win_api`, `hotkey._win_input`). A test class says which system it is
+standing on rather than avoiding the question:
 
 ```python
 class MacOS(ClipboardContract, DikteTest):
@@ -73,14 +82,19 @@ class MacOS(ClipboardContract, DikteTest):
     here = paste.MACOS
 ```
 
-so the Linux half is checked on a Mac and the macOS half on Linux, and a change
-to a chooser cannot quietly break the platform nobody is sitting at. What the
-systems owe in common is written once as a contract class and subclassed by each
-of them.
+so the Linux half is checked on a Mac, the macOS half on Linux and the Windows
+half on both, and a change to a chooser cannot quietly break the platform nobody
+is sitting at. What the systems owe in common is written once as a contract
+class and subclassed by each of them.
 
 The 43 that do carry `@linux_only` are the ones that would need the real thing:
-the `/dev/input` listener, KDE's shortcut file, GNOME's gsettings. Mark a test
-that way only when faking it would leave nothing to test. A test that quietly
+the `/dev/input` listener, KDE's shortcut file, GNOME's gsettings. The 20 with
+`@posix_only` are the half of `integrate.py` that writes files, the menu entry
+and the login item a downloaded build puts down for itself, which want a home
+directory laid out the way those two systems lay one out. Its Windows half is
+one registry value, since the setup program there did the rest, and the three
+functions that read and write it are faked like anything else. Mark a test
+either way only when faking it would leave nothing to test. A test that quietly
 stops running on the platform you are porting to protects nothing.
 
 ## What a pull request should carry

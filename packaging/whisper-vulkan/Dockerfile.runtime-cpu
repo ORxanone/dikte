@@ -1,0 +1,6 @@
+FROM ubuntu@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install --no-install-recommends -y ca-certificates curl libstdc++6 \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /bundle

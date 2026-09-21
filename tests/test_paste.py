@@ -13,6 +13,7 @@ is checked on a Mac and the macOS half on Linux, and a change to the chooser
 cannot quietly break the platform nobody is sitting at.
 """
 
+import ctypes
 import os
 import pathlib
 import subprocess
@@ -22,7 +23,7 @@ import unittest
 from typing import ClassVar
 from unittest import mock
 
-import paste
+from dikte import paste
 from tests.support import DikteTest, FakeCompleted, only_these_tools
 
 
@@ -55,6 +56,9 @@ class Chooser(DikteTest):
 
     def test_a_mac(self):
         self.assertIs(self.under("darwin"), paste.MACOS)
+
+    def test_windows(self):
+        self.assertIs(self.under("win32"), paste.WINDOWS)
 
     def test_a_mac_running_an_x_server_is_still_a_mac(self):
         """XQuartz sets DISPLAY, and none of X's programs are what pastes here."""
@@ -275,9 +279,14 @@ class FakeCoreGraphics:
         self.flags = []      # (event, flags)
         self.posted = []     # (tap, event)
         self.released = []
+        self.prompted = []   # the options dictionaries asked with
 
     # --- ApplicationServices
     def AXIsProcessTrusted(self):
+        return self.trusted
+
+    def AXIsProcessTrustedWithOptions(self, options):
+        self.prompted.append(options)
         return self.trusted
 
     def CGEventCreateKeyboardEvent(self, source, keycode, down):
@@ -301,10 +310,16 @@ class MacOS(ClipboardContract, DikteTest):
     platform = "darwin"
     here = paste.MACOS
 
+    # A stand-in for the CFDictionary: the real one is built out of constants
+    # read from the frameworks, which a fake has none of.
+    OPTIONS = 4242
+
     def setUp(self):
         super().setUp()
         self.api = FakeCoreGraphics()
         self.patch_attr(paste, "_macos_api", lambda: (self.api, self.api))
+        self.patch_attr(paste, "_macos_prompt_options",
+                        lambda services, core: self.OPTIONS)
         self.patch_attr(paste.time, "sleep", lambda seconds: None)
         # It opens the settings pane once per run; each test gets its own run.
         self.patch_attr(paste, "_asked_for_permission", False)
@@ -385,6 +400,31 @@ class MacOS(ClipboardContract, DikteTest):
             paste.press("cmd+v")
         self.assertIn("Accessibility", str(caught.exception))
 
+    def test_asking_is_what_puts_dikte_in_the_accessibility_list(self):
+        """Opening the pane is not enough on its own.
+
+        AXIsProcessTrusted only answers the question; an application that has
+        never asked with the prompt is not in the list, so the pane opens on a
+        list Dikte is not in and the only way through is the + button.
+        """
+        self.api.trusted = False
+        with self.assertRaises(paste.PasteError):
+            paste.press("cmd+v")
+        self.assertEqual(self.api.prompted, [self.OPTIONS])
+        # The dictionary is ours to release, and nothing else made an event.
+        self.assertIn(self.OPTIONS, self.api.released)
+
+    def test_it_asks_once_however_many_dictations_fail(self):
+        self.api.trusted = False
+        for _ in range(3):
+            with self.assertRaises(paste.PasteError):
+                paste.press("cmd+v")
+        self.assertEqual(len(self.api.prompted), 1)
+
+    def test_a_trusted_process_is_never_prompted(self):
+        paste.press("cmd+v")
+        self.assertEqual(self.api.prompted, [])
+
     def test_readiness_is_the_permission_rather_than_a_program(self):
         self.assertTrue(paste.paste_ready())
         self.api.trusted = False
@@ -403,6 +443,45 @@ class MacOS(ClipboardContract, DikteTest):
                         mock.Mock(side_effect=paste.PasteError("no such library")))
         self.assertFalse(paste.paste_ready())
 
+
+class MacPasteGoesWhereTheDictationStarted(MacOS):
+    """The keys land in the frontmost window, so the front is what decides
+    where a transcript ends up."""
+
+    def setUp(self):
+        super().setUp()
+        from dikte import mac_window
+        self.mac_window = mac_window
+        self.activated = []
+        self.patch_attr(mac_window, "activate", self.activated.append)
+
+    def frontmost(self, dikte_is):
+        self.patch_attr(self.mac_window, "is_frontmost", lambda: dikte_is)
+
+    def test_a_dikte_that_took_the_front_hands_it_back_before_pressing(self):
+        self.frontmost(True)
+        paste.press("cmd+v", focus=4242)
+        self.assertEqual(self.activated, [4242])
+        self.assertEqual([event for _, event in self.api.posted], [1001, 1002])
+
+    def test_another_application_in_front_is_where_the_user_went_and_is_left(self):
+        self.frontmost(False)
+        paste.press("cmd+v", focus=4242)
+        self.assertEqual(self.activated, [])
+
+    def test_a_run_that_remembered_nobody_asks_nothing(self):
+        self.frontmost(True)
+        paste.press("cmd+v")
+        self.assertEqual(self.activated, [])
+
+    def test_the_front_is_handed_back_only_once_macos_trusts_dikte(self):
+        """Pulling the user out of their window and then failing to type would
+        be the worst of both."""
+        self.frontmost(True)
+        self.api.trusted = False
+        with self.assertRaises(paste.PasteError):
+            paste.press("cmd+v", focus=4242)
+        self.assertEqual(self.activated, [])
 
 class MacClipboardSnapshot(DikteTest):
     def test_every_native_type_is_restored_and_the_files_are_removed(self):
@@ -427,6 +506,150 @@ class MacClipboardSnapshot(DikteTest):
                                   return_value=FakeCompleted(stdout=b"not json")):
             self.assertIsNone(paste._macos_snapshot())
         self.assertFalse(os.path.exists(directory))
+
+
+class FakeWin32:
+    """user32 and kernel32, as much of both as paste.py calls.
+
+    The clipboard is a string held here. A read materialises it as this
+    machine's own wide characters, which is what wstring_at reads wherever the
+    test runs; a write arrives as the UTF-16 the real clipboard is handed, so
+    what the code sent is exactly what is checked.
+    """
+
+    def __init__(self):
+        self.text = None
+        self.buffers = {}
+        self.next_handle = 1
+        self.pressed = []          # (virtual key, flags), in the order sent
+        self.send_result = None    # None: report every event as delivered
+        self.held = False          # another program has the clipboard open
+        self.out_of_memory = False
+
+    def _keep(self, buffer):
+        handle = self.next_handle
+        self.next_handle += 1
+        self.buffers[handle] = buffer
+        return handle
+
+    # --- user32
+    def OpenClipboard(self, owner):
+        return 0 if self.held else 1
+
+    def CloseClipboard(self):
+        return 1
+
+    def EmptyClipboard(self):
+        self.text = None
+        return 1
+
+    def GetClipboardData(self, fmt):
+        if self.text is None:
+            return 0
+        return self._keep(ctypes.create_unicode_buffer(self.text))
+
+    def SetClipboardData(self, fmt, handle):
+        raw = self.buffers[handle].raw
+        self.text = raw.decode("utf-16-le").split("\x00", 1)[0]
+        return handle
+
+    def SendInput(self, count, inputs, size):
+        self.pressed.extend((entry.union.ki.wVk, entry.union.ki.dwFlags)
+                            for entry in inputs)
+        return count if self.send_result is None else self.send_result
+
+    # --- kernel32
+    def GlobalAlloc(self, flags, size):
+        if self.out_of_memory:
+            return 0
+        return self._keep(ctypes.create_string_buffer(size))
+
+    def GlobalLock(self, handle):
+        buffer = self.buffers.get(handle)
+        return ctypes.addressof(buffer) if buffer else 0
+
+    def GlobalUnlock(self, handle):
+        return 1
+
+    def GlobalFree(self, handle):
+        self.buffers.pop(handle, None)
+        return 1
+
+
+class Windows(Standing, DikteTest):
+    """Windows shells out to nothing: both halves are calls into the system."""
+
+    platform = "win32"
+    here = paste.WINDOWS
+
+    def setUp(self):
+        super().setUp()
+        self.api = FakeWin32()
+        self.patch_attr(paste, "_win_api", lambda: (self.api, self.api))
+        self.patch_attr(paste.time, "sleep", lambda seconds: None)
+
+    def test_what_is_copied_is_what_reads_back(self):
+        paste.copy("ığüşöç İ")
+        self.assertEqual(paste.read_clipboard(), "ığüşöç İ".encode("utf-8"))
+
+    def test_an_empty_clipboard_reads_as_empty_text(self):
+        self.assertEqual(paste.read_clipboard(), b"")
+
+    def test_what_was_saved_goes_back_after_the_paste(self):
+        paste.copy("mine")
+        saved = paste.read_clipboard()
+        paste.copy("the dictation")
+        paste.copy_bytes(saved)
+        self.assertEqual(self.api.text, "mine")
+
+    def test_a_copy_that_fails_leaves_what_was_there(self):
+        """EmptyClipboard is the point of no return, so nothing runs after it."""
+        paste.copy("mine")
+        for failure in ("out_of_memory", "held"):
+            with self.subTest(failure=failure):
+                setattr(self.api, failure, True)
+                with self.assertRaises(paste.PasteError):
+                    paste.copy("the dictation")
+                self.assertEqual(self.api.text, "mine")
+                setattr(self.api, failure, False)
+
+    def test_the_handle_is_not_leaked_when_the_copy_fails(self):
+        self.api.held = True
+        with self.assertRaises(paste.PasteError):
+            paste.copy("the dictation")
+        self.assertEqual(self.api.buffers, {})
+
+    def test_readiness_asks_for_no_program_and_no_permission(self):
+        with only_these_tools():
+            self.assertTrue(paste.paste_ready())
+
+    def test_the_keys_go_down_in_order_and_up_in_reverse(self):
+        paste.press("ctrl+v")
+        keyup = 0x0002
+        self.assertEqual(self.api.pressed,
+                         [(0x11, 0), (0x56, 0), (0x56, keyup), (0x11, keyup)])
+
+    def test_three_keys(self):
+        paste.press("ctrl+shift+v")
+        self.assertEqual([code for code, _ in self.api.pressed],
+                         [0x11, 0x10, 0x56, 0x56, 0x10, 0x11])
+
+    def test_the_other_spellings_land_on_the_same_keys(self):
+        paste.press("super+enter")
+        first, self.api.pressed = self.api.pressed, []
+        paste.press("meta+return")
+        self.assertEqual(self.api.pressed, first)
+
+    def test_a_key_nobody_mapped_is_refused_before_anything_is_sent(self):
+        with self.assertRaises(paste.PasteError):
+            paste.press("ctrl+f13")
+        self.assertEqual(self.api.pressed, [])
+
+    def test_a_press_the_system_did_not_take_says_so(self):
+        self.api.send_result = 0
+        with self.assertRaises(paste.PasteError) as caught:
+            paste.press("ctrl+v")
+        self.assertIn("SendInput", str(caught.exception))
 
 
 if __name__ == "__main__":

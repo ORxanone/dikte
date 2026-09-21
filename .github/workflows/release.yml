@@ -1,0 +1,183 @@
+name: release
+
+# Three ways in, one set of builds behind them.
+#
+#   a push to master   rebuilds the "latest" release, which is the newest
+#                      commit, prerelease, and always at the same download URL
+#   a v* tag           publishes that version and leaves it there
+#   the Run button     raises the version, tags it, and then does the above
+#
+# The Run button and scripts/release.sh do the same thing, and this runs that
+# script rather than repeating it, so the two cannot drift apart.
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: which part of the version to raise
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+permissions:
+  contents: write
+
+# Two pushes in a row would otherwise race each other to replace the same
+# "latest" release, and the one that finishes second is not the newer one. Only
+# those are cancelled: a run that is publishing a version has already pushed a
+# tag by the time it gets there, and cancelling it would leave that tag with no
+# release under it.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  # tests.yml runs the same suite on the same push, and this runs it again
+  # rather than reaching across to it: what that one guards is the branch,
+  # what this one guards is the download, and a "latest" built from a commit
+  # whose tests fail is worse than no latest at all.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - timeout-minutes: 5
+        run: |
+          apt="-o Acquire::Retries=3 -o Acquire::http::Timeout=20"
+          sudo apt-get $apt update
+          sudo apt-get $apt install --no-install-recommends -y \
+            libegl1 libgl1 libxkbcommon0 libdbus-1-3 libglib2.0-0 \
+            libfontconfig1 libfreetype6 libgssapi-krb5-2
+      - run: python -m pip install --quiet PyQt6
+      - run: python -m unittest discover
+
+  version:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.decide.outputs.ref }}
+      tag: ${{ steps.decide.outputs.tag }}
+      version: ${{ steps.decide.outputs.version }}
+      prerelease: ${{ steps.decide.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Raise the version, when that is what was asked for
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          ./scripts/release.sh "${{ inputs.bump }}" --yes
+
+      # A push made with the workflow's own token starts no further workflows,
+      # which is what keeps this from setting itself off again, and is also why
+      # the tag it just made has to be built by this run rather than the next.
+      - name: Work out what is being built
+        id: decide
+        run: |
+          read_version() { sed -n 's/^__version__ = "\(.*\)"$/\1/p' dikte/__init__.py; }
+          case "${{ github.event_name }}" in
+            workflow_dispatch)
+              version="$(read_version)"
+              echo "ref=v$version"       >> "$GITHUB_OUTPUT"
+              echo "tag=v$version"       >> "$GITHUB_OUTPUT"
+              echo "prerelease=false"    >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+                version="${GITHUB_REF#refs/tags/v}"
+                echo "ref=$GITHUB_SHA"   >> "$GITHUB_OUTPUT"
+                echo "tag=v$version"     >> "$GITHUB_OUTPUT"
+                echo "prerelease=false"  >> "$GITHUB_OUTPUT"
+              else
+                # Not a version anybody released: the number in the tree, said
+                # to be ahead of it, and the commit, so that a bug report from
+                # somebody running "latest" names one.
+                version="$(read_version)-dev.${GITHUB_SHA::7}"
+                echo "ref=$GITHUB_SHA"   >> "$GITHUB_OUTPUT"
+                echo "tag=latest"        >> "$GITHUB_OUTPUT"
+                echo "prerelease=true"   >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  # The builds themselves are build.yml, which a pull request touching the
+  # packaging also runs on its own. One definition, so the download somebody
+  # gets from a release and the one a pull request was checked against cannot
+  # come out of two different sets of steps.
+  build:
+    needs: version
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.version.outputs.ref }}
+      version: ${{ needs.version.outputs.prerelease == 'true' && needs.version.outputs.version || '' }}
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: downloads
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          ls -la downloads
+
+          notes=$(cat <<'EOF'
+          Linux: download the AppImage, `chmod +x` it, run it. It writes its own
+          menu entry and starts with you at login the first time it runs, and it
+          leaves an installation that is already on the machine alone.
+
+          macOS: open the .dmg and drag Dikte to Applications. It is not signed
+          with an Apple certificate, so the first launch is refused: open System
+          Settings, Privacy & Security, and press Open Anyway. Or, in a terminal:
+          `xattr -dr com.apple.quarantine /Applications/Dikte.app`. Take the arm64
+          image for an Apple silicon Mac and the x86_64 one for an Intel Mac.
+          Recording, transcribing and pasting need the microphone and
+          Accessibility permissions, which macOS asks for the first time each is
+          used. It asks again after an update, because an application signed with
+          no certificate is one macOS has never seen before.
+
+          Windows: run the setup, which installs for your account alone and asks
+          for no administrator. It carries the ffmpeg recording needs and adds a
+          Start Menu entry, a `dikte` command and, unless you untick it, a start
+          at sign-in. It is not signed either, so SmartScreen offers only "Don't
+          run" until you press More info. Add/Remove Programs uninstalls it.
+          EOF
+          )
+
+          if [ "$TAG" = latest ]; then
+            # Rolling: the release and its tag are replaced rather than added
+            # to, so that the download URL stays the one people wrote down.
+            gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+            gh release create latest downloads/* \
+              --title "latest ($VERSION)" \
+              --prerelease \
+              --target "$GITHUB_SHA" \
+              --notes "The newest commit on master, built and not released. For a version somebody meant to publish, take the release below.
+
+          $notes"
+          else
+            gh release create "$TAG" downloads/* \
+              --title "Dikte $VERSION" \
+              --generate-notes \
+              --notes "$notes"
+          fi

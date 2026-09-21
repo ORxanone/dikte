@@ -1,0 +1,222 @@
+name: whisper.cpp Vulkan bundle
+
+# Only what the bundle is built from. Compiling the Vulkan shaders takes
+# tens of minutes, and a README typo is not worth one: what ties ggml.py to
+# this release is a handful of assertions in tests/test_packaging.py, and
+# those run on every pull request in milliseconds.
+on:
+  pull_request:
+    paths:
+      - packaging/whisper-vulkan/**
+      - .github/workflows/whisper-vulkan.yml
+  workflow_dispatch:
+    inputs:
+      whisper_version:
+        description: Upstream whisper.cpp version (without v)
+        required: true
+        default: "1.9.3"
+        type: string
+      whisper_commit:
+        description: Peeled commit SHA for that reviewed upstream tag
+        required: true
+        default: "371b5a7561823ab2bb32142d2751e35e7534727b"
+        type: string
+      expected_sha256:
+        description: >-
+          Reviewed archive SHA-256. Leave empty for a version this file has
+          not reviewed: the digest of what was built is reported instead of
+          being checked, and publishing is refused.
+        required: false
+        default: ""
+        type: string
+      publish:
+        description: Publish a Dikte dependency release
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: whisper-vulkan-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  WHISPER_VERSION: ${{ inputs.whisper_version || '1.9.3' }}
+  WHISPER_COMMIT: ${{ inputs.whisper_commit || '371b5a7561823ab2bb32142d2751e35e7534727b' }}
+  REVIEWED_WHISPER_VERSION: "1.9.3"
+  REVIEWED_WHISPER_SHA256: c25ca76504144da488eb74441390a7b9aa7ce547e5f2f391cbd831253c9b54d8
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out Dikte
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Validate source coordinates
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$WHISPER_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$WHISPER_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+
+      - name: Check out pinned whisper.cpp source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ggml-org/whisper.cpp
+          ref: ${{ env.WHISPER_COMMIT }}
+          path: vendor/whisper.cpp
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify source version and commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C vendor/whisper.cpp rev-parse HEAD)" = "$WHISPER_COMMIT"
+          git -C vendor/whisper.cpp fetch --depth=1 origin \
+            "refs/tags/v$WHISPER_VERSION:refs/tags/v$WHISPER_VERSION"
+          test "$(git -C vendor/whisper.cpp rev-list -n1 "v$WHISPER_VERSION")" = "$WHISPER_COMMIT"
+          echo "SOURCE_DATE_EPOCH=$(git -C vendor/whisper.cpp show -s --format=%ct HEAD)" >> "$GITHUB_ENV"
+
+      - name: Build pinned build environment
+        run: docker build --pull=false -f packaging/whisper-vulkan/Dockerfile.build -t dikte-whisper-builder packaging/whisper-vulkan
+
+      - name: Build deterministic archive
+        run: |
+          docker run --rm \
+            -e WHISPER_VERSION -e WHISPER_COMMIT -e SOURCE_DATE_EPOCH \
+            -v "$PWD/vendor/whisper.cpp:/src:ro" \
+            -v "$PWD/packaging/whisper-vulkan:/packaging:ro" \
+            -v "$PWD/work:/work" \
+            dikte-whisper-builder \
+            bash /packaging/build-package.sh
+          mkdir -p dist
+          cp work/out/whisper-bin-ubuntu-vulkan-x64.* dist/
+
+      - name: Verify reviewed archive digest
+        shell: bash
+        env:
+          EXPECTED_SHA256: ${{ inputs.expected_sha256 }}
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          set -euo pipefail
+          read -r actual _ < dist/whisper-bin-ubuntu-vulkan-x64.tar.gz.sha256
+          echo "built archive sha256: $actual"
+          expected="$EXPECTED_SHA256"
+          if [ -z "$expected" ] \
+              && [ "$WHISPER_VERSION" = "$REVIEWED_WHISPER_VERSION" ]; then
+            expected="$REVIEWED_WHISPER_SHA256"
+          fi
+          if [ -z "$expected" ]; then
+            # The digest of a version nobody has reviewed yet cannot be known
+            # before it is built. Reporting it is the whole point of the run;
+            # a release out of it is not.
+            if [ "${PUBLISH:-false}" = true ]; then
+              echo "refusing to publish an archive whose digest has not been reviewed" >&2
+              exit 1
+            fi
+            echo "::notice::no reviewed digest for $WHISPER_VERSION." \
+                 "Review the one above, then dispatch again with expected_sha256."
+            exit 0
+          fi
+          test "$actual" = "$expected"
+
+      - name: Validate archive and ELF contract
+        run: OUT_DIR=dist packaging/whisper-vulkan/validate-package.sh
+
+      - name: Schema-validate CycloneDX 1.6 SBOM
+        run: |
+          docker run --rm \
+            -v "$PWD/dist/whisper-bin-ubuntu-vulkan-x64.cdx.json:/sbom.json:ro" \
+            cyclonedx/cyclonedx-cli@sha256:252c2e26f468c25fea1e63ecde1bc3198ad6e9dbb57f5ed3236bddcb2281b3a7 \
+            validate --input-file /sbom.json --input-format json \
+            --input-version v1_6 --fail-on-errors
+
+      - name: CPU fallback smoke test (no Vulkan loader)
+        run: OUT_DIR=dist packaging/whisper-vulkan/smoke-runtime.sh cpu
+
+      - name: Vulkan loader present, no device smoke test
+        run: OUT_DIR=dist packaging/whisper-vulkan/smoke-runtime.sh noicd
+
+      - name: Vulkan plugin-load smoke test (Mesa llvmpipe)
+        run: OUT_DIR=dist packaging/whisper-vulkan/smoke-runtime.sh vulkan
+
+      - name: Upload reviewed outputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: whisper-bin-ubuntu-vulkan-x64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.publish &&
+      github.ref == 'refs/heads/master'
+    needs: build
+    runs-on: ubuntu-22.04
+    environment: dependency-release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Download the exact tested outputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: whisper-bin-ubuntu-vulkan-x64
+          path: dist
+
+      - name: Verify digest sidecar
+        run: (cd dist && sha256sum --check whisper-bin-ubuntu-vulkan-x64.tar.gz.sha256)
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/whisper-bin-ubuntu-vulkan-x64.tar.gz
+
+      - name: Attest SBOM to archive
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/whisper-bin-ubuntu-vulkan-x64.tar.gz
+          sbom-path: dist/whisper-bin-ubuntu-vulkan-x64.cdx.json
+
+      - name: Publish dependency release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: whisper.cpp-v${{ inputs.whisper_version }}
+          RELEASE_TITLE: whisper.cpp v${{ inputs.whisper_version }} Vulkan bundle
+          RELEASE_NOTES: >-
+            Pinned source: ggml-org/whisper.cpp@${{ inputs.whisper_commit }}.
+            Verify with: gh attestation verify
+            whisper-bin-ubuntu-vulkan-x64.tar.gz
+            --repo ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "refusing to replace existing release $RELEASE_TAG" >&2
+            exit 1
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "refusing to replace existing tag $RELEASE_TAG" >&2
+            exit 1
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$RELEASE_TAG" \
+            -f sha="$GITHUB_SHA" >/dev/null
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+            --jq .object.sha)" = "$GITHUB_SHA"
+          gh release create "$RELEASE_TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --prerelease \
+            --latest=false \
+            --title "$RELEASE_TITLE" \
+            --notes "$RELEASE_NOTES"

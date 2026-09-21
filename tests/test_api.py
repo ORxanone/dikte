@@ -9,6 +9,7 @@ is blocked on, and a faked urlopen has no socket to cut, so those tests talk to
 a server of their own on the loopback interface.
 """
 
+import contextlib
 import http.server
 import json
 import os
@@ -16,8 +17,8 @@ import threading
 import time
 import unittest
 
-import api
-import ggml
+from dikte import api
+from dikte import ggml
 from tests.support import (
     DikteTest,
     fake_urlopen,
@@ -53,6 +54,16 @@ class TimestampModel(unittest.TestCase):
         self.assertEqual(api.timestamp_model("openai", "gpt-4o-transcribe"),
                          "whisper-1")
 
+    def test_openrouter_takes_the_file_model_that_was_set(self):
+        self.assertEqual(
+            api.timestamp_model("openrouter", "openai/gpt-4o-transcribe",
+                                "openai/whisper-large-v3"),
+            "openai/whisper-large-v3")
+
+    def test_openrouter_with_no_file_model_falls_back_to_whisper(self):
+        self.assertEqual(api.timestamp_model("openrouter", "openai/gpt-4o-transcribe", ""),
+                         "openai/whisper-1")
+
 
 class Explain(DikteTest):
     def error(self, status):
@@ -79,6 +90,33 @@ class Explain(DikteTest):
     def test_the_status_is_carried_through(self):
         self.assertEqual(self.error(429).status, 429)
 
+    def test_so_is_whether_it_is_worth_asking_again(self):
+        self.assertTrue(self.error(502).retryable)
+        self.assertFalse(self.error(401).retryable)
+
+
+class Retryable(unittest.TestCase):
+    """Which failures a second try can fix, and which will fail the same way."""
+
+    def test_a_gateway_that_gave_up_waiting(self):
+        for status in (408, 429, 500, 502, 503, 504):
+            with self.subTest(status=status):
+                self.assertTrue(api.ApiError("x", status).retryable)
+
+    def test_a_request_that_was_wrong(self):
+        for status in (400, 401, 402, 403, 404, 413, 422):
+            with self.subTest(status=status):
+                self.assertFalse(api.ApiError("x", status).retryable)
+
+    def test_an_error_of_our_own_is_not_the_network(self):
+        self.assertFalse(api.ApiError("Transcript came back empty.").retryable)
+
+    def test_a_connection_that_dropped_is_worth_a_second_try(self):
+        with fake_urlopen(url_error("connection reset")):
+            with self.assertRaises(api.ApiError) as caught:
+                api._request("https://example.test", b"{}", {})
+        self.assertTrue(caught.exception.retryable)
+
 
 class ExtractError(unittest.TestCase):
     def test_the_usual_shape(self):
@@ -92,8 +130,21 @@ class ExtractError(unittest.TestCase):
         body = json.dumps({"error": {"code": 42}})
         self.assertIn("42", api._extract_error(body))
 
+    def test_an_error_wrapped_in_an_array(self):
+        """Google's 503 arrives this way, and .get() on a list raises."""
+        body = json.dumps([{"error": {"code": 503,
+                                      "message": "The model is overloaded."}}])
+        self.assertEqual(api._extract_error(body), "The model is overloaded.")
+
     def test_a_body_that_is_not_json(self):
         self.assertEqual(api._extract_error("<html>502</html>"), "<html>502</html>")
+
+    def test_no_shape_at_all_still_comes_back_as_a_string(self):
+        """It runs while an ApiError is being raised: throwing here would
+        escape the `except ApiError` holding the raw transcript."""
+        for body in ("[]", "[1, 2]", '"a string"', "null", "17"):
+            with self.subTest(body=body):
+                self.assertIsInstance(api._extract_error(body), str)
 
     def test_a_wall_of_html_is_cut_short(self):
         self.assertEqual(len(api._extract_error("x" * 5000)), 300)
@@ -271,12 +322,24 @@ class TranscribeSegments(DikteTest):
         fields = multipart_fields(calls[0])
         self.assertEqual(fields["model"], "whisper-1")
         self.assertEqual(fields["response_format"], "verbose_json")
-        self.assertEqual(fields["timestamp_granularities[]"], "segment")
+        # Both are asked for: whisper answers with segments, and a model that
+        # does not mark them still answers with word times.
+        body = calls[0].data.decode("utf-8", "replace")
+        for level in ("segment", "word"):
+            self.assertIn(
+                f'name="timestamp_granularities[]"\r\n\r\n{level}\r\n', body)
 
     def test_openrouter_uses_the_namespaced_id(self):
         with fake_urlopen(self.reply([{"start": 0, "end": 1, "text": "hi"}])) as calls:
             api.transcribe_segments(OPENROUTER, self.wav)
         self.assertEqual(multipart_fields(calls[0])["model"], "openai/whisper-1")
+
+    def test_openrouter_asks_for_the_file_model_when_one_is_set(self):
+        target = OPENROUTER._replace(file_model="mistralai/voxtral-mini-transcribe")
+        with fake_urlopen(self.reply([{"start": 0, "end": 1, "text": "hi"}])) as calls:
+            api.transcribe_segments(target, self.wav)
+        self.assertEqual(multipart_fields(calls[0])["model"],
+                         "mistralai/voxtral-mini-transcribe")
 
     def test_groq_stays_on_the_model_it_was_given(self):
         target = GROQ._replace(model="whisper-large-v3")
@@ -304,6 +367,74 @@ class TranscribeSegments(DikteTest):
         with fake_urlopen(self.reply([{"start": 5, "end": 1, "text": "hi"}])):
             self.assertEqual(api.transcribe_segments(OPENAI, self.wav),
                              [(5.0, 5.0, "hi")])
+
+    def test_a_long_sentence_is_broken_where_it_gets_too_long_to_read(self):
+        words = [{"word": "word", "start": i * 0.2, "end": i * 0.2 + 0.2}
+                 for i in range(60)]
+        cues = api.cues_from_words(words)
+        self.assertGreater(len(cues), 1)
+        for start, end, text in cues:
+            self.assertLessEqual(len(text), api.MAX_CUE_CHARS)
+            self.assertLessEqual(end - start, api.MAX_CUE_SECONDS + 0.2)
+
+    def test_a_pause_between_short_sentences_does_not_join_them(self):
+        cues = api.cues_from_words([
+            {"word": "Yes.", "start": 0.0, "end": 0.3},
+            {"word": "No.", "start": 9.0, "end": 9.3},
+        ])
+        self.assertEqual([(start, text) for start, _, text in cues],
+                         [(0.0, "Yes."), (9.0, "No.")])
+
+    def test_a_cue_too_short_to_read_is_held_until_the_next_one(self):
+        cues = api.cues_from_words([
+            {"word": "Yes.", "start": 0.0, "end": 0.3},
+            {"word": "No.", "start": 9.0, "end": 9.3},
+        ])
+        # The first has the room for it, the last has nothing after it to wait for.
+        self.assertEqual(cues[0][1], api.MIN_CUE_SECONDS)
+        self.assertEqual(cues[1][1], 9.0 + api.MIN_CUE_SECONDS)
+
+    def test_a_list_marker_does_not_end_a_cue_on_its_own(self):
+        cues = api.cues_from_words([
+            {"word": "1.", "start": 0.0, "end": 0.2},
+            {"word": "Antivirus.", "start": 0.4, "end": 1.6},
+        ])
+        self.assertEqual([text for _, _, text in cues], ["1. Antivirus."])
+
+    def test_a_sentence_ending_inside_a_quote_still_ends_the_cue(self):
+        cues = api.cues_from_words([
+            {"word": '"Stop', "start": 0.0, "end": 1.0},
+            {"word": 'there."', "start": 1.1, "end": 2.0},
+            {"word": "Then", "start": 2.2, "end": 2.6},
+        ])
+        self.assertEqual([text for _, _, text in cues],
+                         ['"Stop there."', "Then"])
+
+    def test_word_times_take_over_from_segments_too_long_to_read(self):
+        # What a model that does not mark segments answers with: one entry for
+        # the whole file, and the real timing in the words beside it.
+        reply = {
+            "text": "One. Two.",
+            "segments": [{"start": 0, "end": 60, "text": "One. Two."}],
+            "words": [
+                {"word": "One.", "start": 0.1, "end": 1.5},
+                {"word": "Two.", "start": 1.7, "end": 3.0},
+            ],
+        }
+        with fake_urlopen(reply):
+            self.assertEqual(api.transcribe_segments(OPENAI, self.wav),
+                             [(0.1, 1.5, "One."), (1.7, 3.0, "Two.")])
+
+    def test_whisper_segments_are_left_alone_when_words_come_too(self):
+        reply = {
+            "text": "hi there",
+            "segments": [{"start": 0, "end": 2, "text": "hi there"}],
+            "words": [{"word": "hi", "start": 0.0, "end": 0.5},
+                      {"word": "there", "start": 0.5, "end": 2.0}],
+        }
+        with fake_urlopen(reply):
+            self.assertEqual(api.transcribe_segments(OPENAI, self.wav),
+                             [(0.0, 2.0, "hi there")])
 
     def test_a_model_that_returned_no_segments_still_gives_its_text(self):
         with fake_urlopen(self.reply([], text="the whole thing")):
@@ -357,6 +488,37 @@ class Cleanup(DikteTest):
         self.assertEqual(sent_json(calls[0])["reasoning"],
                          {"effort": "high", "exclude": True})
 
+    def test_gemini_takes_openai_s_flat_field_rather_than_the_object(self):
+        _, calls = self.call(chat_reply("Hello."), reasoning="low",
+                             provider="gemini", service="Google AI Studio")
+        payload = sent_json(calls[0])
+        self.assertEqual(payload["reasoning_effort"], "low")
+        self.assertNotIn("reasoning", payload)
+
+    def test_off_is_asked_for_as_the_lowest_rung_google_actually_has(self):
+        """Sending "none" is a 400, and Flash left alone thinks."""
+        _, calls = self.call(chat_reply("Hello."), reasoning="none",
+                             provider="gemini", service="Google AI Studio")
+        self.assertEqual(sent_json(calls[0])["reasoning_effort"], "minimal")
+
+    def test_a_rung_google_does_not_have_lands_on_the_nearest_one(self):
+        for asked in ("xhigh", "max"):
+            with self.subTest(asked=asked):
+                _, calls = self.call(chat_reply("Hello."), reasoning=asked,
+                                     provider="gemini", service="Google AI Studio")
+                self.assertEqual(sent_json(calls[0])["reasoning_effort"], "high")
+
+    def test_gemini_left_on_the_model_s_own_default_is_told_nothing(self):
+        _, calls = self.call(chat_reply("Hello."), provider="gemini",
+                             service="Google AI Studio")
+        self.assertNotIn("reasoning_effort", sent_json(calls[0]))
+
+    def test_a_missing_gemini_key_says_google_ai_studio(self):
+        with self.assertRaises(api.ApiError) as caught:
+            api.cleanup("hello", "", "gemini-3.5-flash-lite", "prompt",
+                        provider="gemini", service="Google AI Studio")
+        self.assertIn("Google AI Studio", str(caught.exception))
+
     def test_a_local_base_url(self):
         _, calls = self.call(chat_reply("Hello."), base_url="http://localhost:1234/v1")
         self.assertEqual(calls[0].full_url, "http://localhost:1234/v1/chat/completions")
@@ -375,6 +537,29 @@ class Cleanup(DikteTest):
         with fake_urlopen(chat_reply("   ")), self.assertRaises(api.ApiError):
             api.cleanup("hello", "k", "m", "p")
 
+    def test_a_reply_cut_off_at_a_ceiling_is_refused_rather_than_pasted(self):
+        # Half a sentence looks like a cleaned-up transcript and is not one. The
+        # caller keeps what it was given, which is the whole dictation.
+        reply = {"choices": [{"message": {"content": "Hello, and then the"},
+                              "finish_reason": "length"}]}
+        with fake_urlopen(reply), self.assertRaises(api.ApiError) as caught:
+            api.cleanup("hello", "k", "m", "p")
+        self.assertIn("cut off", str(caught.exception))
+
+    def test_a_reply_that_stopped_on_its_own_is_kept(self):
+        reply = {"choices": [{"message": {"content": "Hello."},
+                              "finish_reason": "stop"}]}
+        with fake_urlopen(reply):
+            self.assertEqual(api.cleanup("hello", "k", "m", "p"), "Hello.")
+
+    def test_all_thinking_is_named_before_the_ceiling_it_was_cut_at(self):
+        """Both are true at once, and only one of them says what to change."""
+        reply = {"choices": [{"message": {"content": "", "reasoning": "hmm"},
+                              "finish_reason": "length"}]}
+        with fake_urlopen(reply), self.assertRaises(api.ApiError) as caught:
+            api.cleanup("hello", "k", "m", "p")
+        self.assertIn("Thinking", str(caught.exception))
+
     def test_a_rate_limit_is_explained(self):
         with fake_urlopen(http_error(429)), \
                 self.assertRaises(api.ApiError) as caught:
@@ -383,6 +568,14 @@ class Cleanup(DikteTest):
 
 
 class Chat(DikteTest):
+    def test_an_answer_cut_off_at_a_ceiling_is_refused_rather_than_pasted(self):
+        # Half an answer reads like a whole one once it is on the screen.
+        reply = {"choices": [{"message": {"content": "Booked it for the"},
+                              "finish_reason": "length"}]}
+        with fake_urlopen(reply), self.assertRaises(api.ApiError) as caught:
+            api.chat([{"role": "user", "content": "book it"}], "k", "m", "p")
+        self.assertIn("cut off", str(caught.exception))
+
     def test_the_history_is_sent_after_the_system_prompt(self):
         history = [{"role": "user", "content": "book it"},
                    {"role": "assistant", "content": "done"}]
@@ -486,6 +679,40 @@ class ModelLists(DikteTest):
             api.openai_models("", api.GROQ_URL, "Groq")
         self.assertIn("Groq", str(caught.exception))
 
+    def test_gemini_keeps_only_the_models_that_answer_a_chat_request(self):
+        with fake_urlopen({"data": [{"id": "gemini-3.5-flash"},
+                                    {"id": "text-embedding-004"},
+                                    {"id": "imagen-4.0"},
+                                    {"id": "gemini-2.5-flash-lite"}]}) as calls:
+            models = api.gemini_models("AIza-test")
+        self.assertEqual(calls[0].full_url,
+                         "https://generativelanguage.googleapis.com/v1beta/openai/models")
+        self.assertEqual(models, ["gemini-2.5-flash-lite", "gemini-3.5-flash"])
+
+    def test_the_long_form_of_an_id_is_shortened_to_what_a_request_wants(self):
+        with fake_urlopen({"data": [{"id": "models/gemini-3.5-flash-lite"}]}):
+            self.assertEqual(api.gemini_models("AIza-test"),
+                             ["gemini-3.5-flash-lite"])
+
+    def test_a_gemini_id_that_is_not_a_chat_model_is_left_out(self):
+        """Google names its pictures and its voices `gemini` too."""
+        with fake_urlopen({"data": [{"id": "gemini-3.5-flash"},
+                                    {"id": "gemini-embedding-001"},
+                                    {"id": "gemini-2.5-flash-image"},
+                                    {"id": "gemini-2.5-flash-preview-tts"},
+                                    {"id": "gemini-2.5-native-audio"}]}):
+            self.assertEqual(api.gemini_models("AIza-test"), ["gemini-3.5-flash"])
+
+    def test_gemini_sends_the_key_as_a_bearer_token(self):
+        with fake_urlopen({"data": []}) as calls:
+            api.gemini_models("AIza-test")
+        self.assertEqual(calls[0].get_header("Authorization"), "Bearer AIza-test")
+
+    def test_a_missing_gemini_key_says_google_ai_studio(self):
+        with self.assertRaises(api.ApiError) as caught:
+            api.gemini_models("")
+        self.assertIn("Google AI Studio", str(caught.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -494,11 +721,14 @@ if __name__ == "__main__":
 class FakeServer:
     """A ggml.Server as far as api.py is concerned."""
 
-    def __init__(self, url="http://127.0.0.1:9999/v1", fails="", log=""):
+    def __init__(self, url="http://127.0.0.1:9999/v1", fails="", log="",
+                 context=8192):
         self.url = url
         self.fails = fails
         self.log = log
         self.starts = 0
+        self.held = 0
+        self.context = context
 
     def serve(self):
         self.starts += 1
@@ -506,8 +736,19 @@ class FakeServer:
             raise ggml.LocalError(self.fails)
         return self.url
 
+    @contextlib.contextmanager
+    def busy(self):
+        self.held += 1
+        try:
+            yield
+        finally:
+            self.held -= 1
+
     def error(self):
         return self.log
+
+    def settings(self):
+        return {"context": self.context}
 
 
 LOCAL = api.Target("local", "Local whisper", "", "", "ggml-base.bin")
@@ -585,6 +826,47 @@ class TranscribeHere(DikteTest):
         with fake_urlopen({"segments": [{"start": 0, "end": 1, "text": " hi"}]}) as calls:
             api.transcribe_segments(LOCAL, self.wav)
         self.assertEqual(multipart_fields(calls[0])["model"], "ggml-base.bin")
+
+    # ---- the detected language --------------------------------------------
+
+    def test_auto_mode_asks_whisper_for_the_detected_language(self):
+        # The -nlp the server was started with is switched back on for this one
+        # request, so whisper's verbose_json reports what it heard.
+        reply = {"text": " Merhaba dünya. ", "detected_language": "turkish"}
+        with fake_urlopen(reply) as calls:
+            text, code = api.transcribe_detected(LOCAL, self.wav, language="auto")
+        fields = multipart_fields(calls[0])
+        self.assertEqual(fields["response_format"], "verbose_json")
+        self.assertEqual(fields["no_language_probabilities"], "false")
+        self.assertNotIn("language", fields)
+        self.assertEqual(text, "Merhaba dünya.")
+        self.assertEqual(code, "tr")
+
+    def test_a_fixed_language_reports_no_detection(self):
+        with fake_urlopen({"text": "hello"}) as calls:
+            text, code = api.transcribe_detected(LOCAL, self.wav, language="tr")
+        self.assertNotIn("no_language_probabilities", multipart_fields(calls[0]))
+        self.assertEqual(text, "hello")
+        self.assertEqual(code, "")
+
+    def test_detected_azerbaijani_gets_its_own_code(self):
+        """Without it the Azerbaijani cleanup prompt is never reached in auto
+        mode: an unknown code falls back to the English one."""
+        with fake_urlopen({"text": "Salam", "detected_language": "azerbaijani"}):
+            _text, code = api.transcribe_detected(LOCAL, self.wav, language="auto")
+        self.assertEqual(code, "az")
+
+    def test_a_detected_language_without_a_code_stays_unknown(self):
+        with fake_urlopen({"text": "hello", "detected_language": "somali"}):
+            _text, code = api.transcribe_detected(LOCAL, self.wav, language="auto")
+        self.assertEqual(code, "")
+
+    def test_a_hosted_auto_run_transcribes_without_detection(self):
+        with fake_urlopen({"text": "hi"}) as calls:
+            text, code = api.transcribe_detected(OPENAI, self.wav, language="auto")
+        self.assertNotIn("no_language_probabilities", multipart_fields(calls[0]))
+        self.assertEqual(text, "hi")
+        self.assertEqual(code, "")
 
 
 class Stopping(unittest.TestCase):

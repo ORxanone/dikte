@@ -1,0 +1,44 @@
+FROM ubuntu@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG CMAKE_VERSION=3.31.6
+ARG CMAKE_SHA256=5a1133ff103c71eb5120e2cc3de922733e7d8a26a98ae716397e8676adb367bf
+
+COPY lunarg-signing-key-pub.asc /tmp/lunarg.asc
+
+RUN set -eux; \
+    test "$(sha256sum /tmp/lunarg.asc | cut -d' ' -f1)" = aa1c3c29673140e77f0d6a9aaeed5d9b5621e305ead51c59fae4458bbb4df92b; \
+    apt-get update; \
+    apt-get install --no-install-recommends -y \
+      build-essential=12.9ubuntu3 \
+      ca-certificates \
+      curl \
+      file \
+      git \
+      gnupg \
+      ninja-build=1.10.1-1 \
+      patchelf=0.14.3-1 \
+      python3 \
+      xz-utils; \
+    install -d -m 0755 /usr/share/keyrings; \
+    gpg --dearmor -o /usr/share/keyrings/lunarg.gpg /tmp/lunarg.asc; \
+    printf '%s\n' 'deb [signed-by=/usr/share/keyrings/lunarg.gpg] https://packages.lunarg.com/vulkan jammy main' \
+      > /etc/apt/sources.list.d/lunarg-vulkan.list; \
+    apt-get update; \
+    apt-get install --no-install-recommends -y \
+      libvulkan-dev=1.4.313.0~rc1-1lunarg22.04-1 \
+      vulkan-headers=1.4.313.0~rc1-1lunarg22.04-1 \
+      shaderc=2025.2~rc1-1lunarg22.04-1 \
+      spirv-headers=1.6.1+1.4.313.0~rc1-1lunarg22.04-1; \
+    curl --fail --location --retry 3 \
+      "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz" \
+      -o /tmp/cmake.tar.gz; \
+    test "$(sha256sum /tmp/cmake.tar.gz | cut -d' ' -f1)" = "$CMAKE_SHA256"; \
+    tar -xzf /tmp/cmake.tar.gz --strip-components=1 -C /usr/local; \
+    rm -rf /var/lib/apt/lists/* /tmp/cmake.tar.gz /tmp/lunarg.asc; \
+    cmake --version; \
+    glslc --version; \
+    test -f /usr/include/vulkan/vulkan.h; \
+    test -f /usr/share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake
+
+WORKDIR /work

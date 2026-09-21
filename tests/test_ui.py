@@ -6,20 +6,36 @@ save, so a setting added to one half and not the other is silently reset the
 next time anybody presses Save. That is the failure this catches.
 """
 
+import json
+import os
 import sys
+import time
 import unittest
 from typing import ClassVar
 from unittest import mock
 
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtCore import QPoint, QPointF, QRect, Qt
+from PyQt6.QtGui import QHideEvent, QShowEvent, QWheelEvent
+from PyQt6.QtWidgets import QApplication, QComboBox, QMessageBox, QSpinBox, QWidget
 
-import cleanup
-import config as cfg
-import hotkey
-import overlay as overlay_module
-import paste
-import settings_ui
+from dikte import audio
+from dikte import cleanup
+from dikte import config as cfg
+from dikte import ggml
+from dikte import hotkey
+from dikte import hub
+from dikte import ipc
+from dikte import overlay as overlay_module
+from dikte import paste
+from dikte import settings_ui
+from dikte import update
+from dikte.i18n import t
 from tests.support import DikteTest, only_these_tools
+
+# The harness below replaces this method on the class so that opening a window
+# in a test never calls anybody; taken here, before any test runs, so the two
+# tests about what it does when called still have the real one.
+REAL_LOAD_HOSTED_MODELS = settings_ui.SettingsWindow._load_hosted_models
 
 # One application for the whole run; Qt allows no second one.
 _app = QApplication.instance() or QApplication([])
@@ -35,6 +51,8 @@ CHANGED = {
     "paste_shortcut": "ctrl+shift+v",
     "restore_clipboard": True,
     "overlay_corner": "top-right",
+    "overlay_screen": "DP-1",
+    "overlay_follows_pointer": True,
     "max_seconds": 120,
     "skip_silent": False,
     "silence_db": -42.0,
@@ -43,6 +61,7 @@ CHANGED = {
     "openai_api_key": "sk-test-key",
     "groq_api_key": "gsk-test-key",
     "openrouter_api_key": "sk-or-test-key",
+    "gemini_api_key": "AIza-test-key",
     "transcribe_provider": "openrouter",
     "transcribe_model": "whisper-1",
     "groq_transcribe_model": "whisper-large-v3",
@@ -52,16 +71,20 @@ CHANGED = {
     "cleanup_model": "some/other-model",
     "cleanup_claude_model": "opus",
     "cleanup_codex_model": "gpt-5",
+    "cleanup_gemini_model": "gemini-2.5-flash",
+    "cleanup_agy_model": "gemini-3.1-pro-low",
     "cleanup_reasoning": "high",
     "local_model": "ggml-small.bin",
     "local_gpu": False,
     "local_preload": False,
-    "local_threads": 6,
+    "local_threads": 1,
     "local_llm_model": "gemma-3-4b-it-Q4_K_M.gguf",
     "local_llm_repo": "ggml-org/gemma-4-E2B-it-GGUF",
     "local_llm_gpu": False,
     "local_llm_preload": True,
     "local_llm_reasoning": "low",
+    "local_idle_unload": False,
+    "local_idle_minutes": 45,
     "cleanup_prompt": "Only fix the punctuation.",
     "file_cleanup_prompt": "Keep the stamps where they are.",
     "transcribe_prompt": "Paraşüt, OpenFrame",
@@ -71,6 +94,7 @@ CHANGED = {
     "assistant_codex_model": "gpt-5",
     "assistant_codex_sandbox": "read-only",
     "assistant_openrouter_model": "some/agent-model",
+    "assistant_agy_model": "gemini-3.1-pro-low",
     "assistant_reasoning": "high",
     "assistant_dir": "/tmp",
     "assistant_timeout": 600,
@@ -94,8 +118,10 @@ CHANGED = {
     "file_cleanup": False,
     "shortcut": "Ctrl+Alt+Space",
     "cancel_shortcut": "Meta+Shift+Space",
+    "pause_shortcut": "Meta+P",
     "evdev_hotkey": True,
     "history_limit": 50,
+    "update_check": False,
 }
 
 
@@ -104,18 +130,36 @@ class Settings(DikteTest):
     # one. Everything else about the window is the same on both.
     changed = CHANGED
     platform = "linux"
+    # A session with no shortcut registry, which is what most Linux desktops
+    # are. The subclasses below stand on the other two. Pinned rather than
+    # inherited from whatever the machine running the suite is logged into,
+    # since half the shortcut tab is built from the answer.
+    desktop = "i3"
+    tools: ClassVar[tuple] = ()
 
     def setUp(self):
         super().setUp()
         # No pactl, no model lists over the network, and no modal dialogue
         # waiting for somebody to press OK.
         self.enterContext(mock.patch.object(sys, "platform", self.platform))
-        self.enterContext(only_these_tools())
+        self.enterContext(only_these_tools(*self.tools))
+        self.enterContext(mock.patch.dict(
+            os.environ, {"XDG_CURRENT_DESKTOP": self.desktop}))
         self.enterContext(mock.patch.object(QMessageBox, "information"))
         self.enterContext(mock.patch.object(settings_ui.SettingsWindow,
                                             "_load_models"))
         self.enterContext(mock.patch.object(settings_ui.SettingsWindow,
                                             "_load_transcribe_models"))
+        self.enterContext(mock.patch.object(settings_ui.SettingsWindow,
+                                            "_load_codex_models"))
+        self.enterContext(mock.patch.object(settings_ui.SettingsWindow,
+                                            "_load_agy_models"))
+        self.enterContext(mock.patch.object(settings_ui.SettingsWindow,
+                                            "_load_hosted_models"))
+        # The local model boxes fetch their own list the moment they are shown,
+        # from a thread, which is nobody's test failing but a real request.
+        self.enterContext(mock.patch.object(settings_ui.LocalModelBox,
+                                            "_fetch_models"))
         self.enterContext(mock.patch.object(settings_ui.hotkey, "APPLICATIONS_DIR",
                                             self.path("applications")))
         self.enterContext(mock.patch.object(settings_ui.hotkey, "SHORTCUTS_FILE",
@@ -127,11 +171,159 @@ class Settings(DikteTest):
         self.addCleanup(window.close)
         return window
 
-    def test_the_window_opens_with_every_tab_on_it(self):
+    @staticmethod
+    def wheel():
+        """One notch of a mouse wheel, rolled downwards."""
+        return QWheelEvent(QPointF(5, 5), QPointF(5, 5), QPoint(0, 0),
+                           QPoint(0, -120), Qt.MouseButton.NoButton,
+                           Qt.KeyboardModifier.NoModifier,
+                           Qt.ScrollPhase.NoScrollPhase, False)
+
+    def test_settings_keeps_configuration_and_exposes_separate_task_pages(self):
         window = self.window(cfg.Config())
         tabs = window.findChildren(settings_ui.QTabWidget)[0]
-        self.assertEqual(tabs.count(), 9)
+        self.assertEqual(tabs.count(), 7)
+        self.assertEqual(set(window.task_pages), {"file", "minutes", "history"})
         self.assertEqual(window.windowTitle(), "Dikte Settings")
+
+    def test_no_tab_can_stretch_the_window_past_a_small_screen(self):
+        # A tab that keeps its full height hands that height to the window as a
+        # minimum, and a tall one then carries Save off the bottom of a laptop
+        # screen with no way to drag it back. Each tab scrolls instead.
+        window = self.window(cfg.Config())
+        for index in range(window.tabs.count()):
+            window.tabs.setCurrentIndex(index)
+            self.assertLess(window.minimumSizeHint().height(), 500,
+                            window.tabs.tabText(index))
+
+    def test_the_window_cannot_be_dragged_down_to_a_stub(self):
+        # A tab that scrolls asks for no height of its own, which leaves nothing
+        # to stop the window being pulled down to a tab bar and half a button.
+        window = self.window(cfg.Config())
+        window.resize(1, 1)
+        self.assertGreaterEqual(window.width(), 500)
+        self.assertGreaterEqual(window.height(), 360)
+
+    def test_the_wheel_passes_over_a_box_it_was_not_aimed_at(self):
+        # Every tab scrolls now, and a combo box reads the wheel as a change of
+        # value: rolling down the page with the pointer over the language box
+        # would pick another language on the way past, and Save would write it
+        # down. The box takes the wheel once it has been clicked into.
+        window = self.window(cfg.Config())
+        # Shown and activated, because a box in a window nobody is looking at
+        # can be given the focus but never has it.
+        window.show()
+        window.activateWindow()
+        QApplication.processEvents()
+        box = window.ui_language
+        # Not the wheel focus a combo box has by default: Qt hands the focus
+        # over before it delivers the wheel, which would make "has the focus"
+        # true for the very roll being refused.
+        self.assertEqual(box.focusPolicy(), Qt.FocusPolicy.StrongFocus)
+        before = box.currentIndex()
+        rolled = self.wheel()
+        QApplication.sendEvent(box, rolled)
+        self.assertEqual(box.currentIndex(), before)
+        # Refused, not swallowed. An unaccepted wheel event is the one Qt
+        # carries on up to the scroll area, so the page moves instead.
+        self.assertFalse(rolled.isAccepted())
+        box.setFocus()
+        QApplication.sendEvent(box, self.wheel())
+        self.assertNotEqual(box.currentIndex(), before)
+
+    def test_the_wheel_uses_remembered_focus_in_an_inactive_window(self):
+        # Keep the window hidden so no desktop activation policy can give it
+        # keyboard focus. Its remembered focus still selects the wheel target.
+        for widget_type in (QComboBox, QSpinBox):
+            with self.subTest(widget=widget_type.__name__):
+                window = QWidget()
+                self.addCleanup(window.deleteLater)
+                box = widget_type(window)
+                other = QComboBox(window)
+                if isinstance(box, QComboBox):
+                    box.addItems(["first", "second", "third"])
+                    box.setCurrentIndex(1)
+                    value = box.currentIndex
+                else:
+                    box.setValue(5)
+                    value = box.value
+                box.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+                guard = settings_ui.WheelGuard(window)
+                box.installEventFilter(guard)
+                box.setFocus()
+                self.assertFalse(window.isActiveWindow())
+                self.assertFalse(box.hasFocus())
+                self.assertIs(window.focusWidget(), box)
+                before = value()
+                QApplication.sendEvent(box, self.wheel())
+                self.assertNotEqual(value(), before)
+                other.setFocus()
+                self.assertIs(window.focusWidget(), other)
+                before = value()
+                rolled = self.wheel()
+                QApplication.sendEvent(box, rolled)
+                self.assertEqual(value(), before)
+                self.assertFalse(rolled.isAccepted())
+
+    def test_the_wheel_is_refused_when_another_widget_has_focus(self):
+        window = self.window(cfg.Config())
+        box = window.ui_language
+        other = window.corner
+        other.setFocus()
+        before = box.currentIndex()
+        rolled = self.wheel()
+        QApplication.sendEvent(box, rolled)
+        self.assertEqual(box.currentIndex(), before)
+        self.assertFalse(rolled.isAccepted())
+
+    def test_a_wrapped_label_keeps_the_room_its_lines_need(self):
+        # The program path shares a row with a button, and a row is measured
+        # before its width is known: the label has to claim the second line back
+        # itself, and give it up again when the window is widened.
+        label = settings_ui.WrappedLabel()
+        # Shown, because a hidden widget is told about its new size only once
+        # somebody looks at it, and the height is worked out from that size.
+        label.show()
+        self.addCleanup(label.deleteLater)
+        line = label.fontMetrics().height()
+        label.resize(120, line)
+        label.setText("Installed on the system: /opt/homebrew/bin/whisper-server")
+        self.assertGreater(label.minimumHeight(), line)
+        label.resize(2000, line)
+        self.assertLessEqual(label.minimumHeight(), line)
+
+    def test_a_label_written_before_the_layout_places_it_claims_nothing(self):
+        # The publisher note is written while the settings window is still
+        # being built, when the label is a handful of pixels wide. Wrapped
+        # against that width the sentence became a hundred lines, and the
+        # minimum taken from it did not stay a minimum: QLabel folds it into
+        # its own cached size hints and clears that cache only when the text
+        # changes. The group box stood thousands of pixels tall, with the
+        # model box and everything under it off the bottom of the window,
+        # until another publisher was picked.
+        label = settings_ui.WrappedLabel()
+        self.addCleanup(label.deleteLater)
+        line = label.fontMetrics().height()
+        label.resize(8, line)
+        label.setText("Google Gemma 4, the small one. The default: nothing "
+                      "else this size follows an instruction as closely, and "
+                      "cleanup is all instruction.")
+        self.assertEqual(label.minimumHeight(), 0)
+        # Placed and shown, which is the first width worth measuring against.
+        # The room the wrapping needs is claimed then, and it is the lines the
+        # sentence takes at this width rather than at the last one. Counted
+        # off the font rather than written down here, because how many lines
+        # 400 pixels hold is a different answer on every machine.
+        label.resize(400, line)
+        label.show()
+        wrap = Qt.TextFlag.TextWordWrap | Qt.TextFlag.TextWrapAnywhere
+        needed = label.fontMetrics().boundingRect(
+            QRect(0, 0, 400, 0), wrap, label.text()).height()
+        self.assertGreater(needed, line)      # or the sentence never wrapped
+        self.assertEqual(label.minimumHeight(), needed)
+        # And the label's own hints are the wrapping at this width too, not
+        # the hundred lines the eight pixel one asked for.
+        self.assertLessEqual(label.sizeHint().height(), 3 * needed)
 
     def test_saving_without_touching_anything_changes_nothing(self):
         """Every widget has to load what is stored, or Save writes its default
@@ -150,10 +342,26 @@ class Settings(DikteTest):
             with self.subTest(key=key):
                 self.assertEqual(stored[key], value)
 
+    def test_only_a_save_that_changed_the_language_says_so(self):
+        # The owner answers language_changed by replacing the window, so a
+        # save that left the language alone must keep quiet.
+        i18n = settings_ui.i18n
+        self.addCleanup(i18n.set_language, i18n.language())
+        window = self.window(cfg.Config())
+        heard = []
+        window.language_changed.connect(lambda: heard.append(True))
+        window._save()
+        self.assertEqual(heard, [])
+        other = "en" if i18n.language() == "tr" else "tr"
+        window._select_data(window.ui_language, other)
+        window._save()
+        self.assertEqual(heard, [True])
+
     def test_the_model_box_on_screen_belongs_to_whoever_cleans_up(self):
         """An OpenRouter id and a Claude alias are not the same field."""
         window = self.window(cfg.Config())
         boxes = {"openrouter": window.cleanup_model_row,
+                 "opencode": window.cleanup_opencode_model_row,
                  "claude": window.cleanup_claude_model,
                  "codex": window.cleanup_codex_model}
         for provider, box in boxes.items():
@@ -163,6 +371,178 @@ class Settings(DikteTest):
                          if not other.isHidden()]
                 self.assertEqual(shown, [provider])
                 self.assertFalse(box.isHidden())
+
+    def test_editable_boxes_live_in_forms_that_grow_the_field_column(self):
+        window = self.window(cfg.Config())
+
+        def contains(layout, target):
+            for index in range(layout.count()):
+                item = layout.itemAt(index)
+                widget = item.widget()
+                if widget is target or (widget is not None and
+                                        widget.isAncestorOf(target)):
+                    return True
+                child = item.layout()
+                if child is not None and contains(child, target):
+                    return True
+            return False
+
+        forms = window.findChildren(settings_ui.QFormLayout)
+        boxes = [
+            window.paste_shortcut,
+            window.transcribe_model,
+            window.file_model,
+            window.cleanup_model,
+            window.cleanup_gemini_model,
+            window.cleanup_opencode_model,
+            window.cleanup_agy_model,
+            window.cleanup_claude_model,
+            window.cleanup_codex_model,
+            window.assistant_model,
+            window.assistant_agy_model,
+            window.assistant_opencode_model,
+            window.assistant_codex_model,
+            window.assistant_openrouter_model,
+            window.meeting_model,
+            *(box for box, _status, _missing in
+              window._shortcut_rows.values()),
+        ]
+        for box in boxes:
+            form = next((candidate for candidate in forms
+                         if contains(candidate, box)), None)
+            with self.subTest(box=box.objectName() or box.currentText()):
+                self.assertIsNotNone(form)
+                self.assertEqual(
+                    form.fieldGrowthPolicy(),
+                    settings_ui.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow,
+                )
+
+        self.assertEqual(
+            window.local_llm.layout().fieldGrowthPolicy(),
+            settings_ui.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow,
+        )
+
+    def test_codex_answering_refills_both_of_its_boxes(self):
+        """The list Codex gave replaces the built-in one, in both places, and
+        neither loses what was already picked."""
+        conf = self.config(cleanup_codex_model="my-own-model")
+        window = self.window(conf)
+        window._on_codex_models_loaded(["gpt-6", "gpt-6-mini"])
+        for combo in (window.cleanup_codex_model, window.assistant_codex_model):
+            with self.subTest(combo=combo.objectName() or "combo"):
+                offered = [combo.itemText(i) for i in range(combo.count())]
+                self.assertEqual(offered[1:], ["gpt-6", "gpt-6-mini"])
+        self.assertEqual(window.cleanup_codex_model.currentText(),
+                         "my-own-model")
+
+    def test_opencode_answering_refills_both_of_its_boxes(self):
+        """The fetched catalog replaces the built-in list in the cleanup and
+        agent boxes alike, and neither loses what was picked."""
+        conf = self.config(cleanup_opencode_model="my-own-model")
+        window = self.window(conf)
+        window._on_opencode_models_loaded(["glm-9", "kimi-k9"], "")
+        for combo in (window.cleanup_opencode_model,
+                      window.assistant_opencode_model):
+            with self.subTest(combo=combo.objectName() or "combo"):
+                offered = [combo.itemText(i) for i in range(combo.count())]
+                self.assertEqual(offered, ["glm-9", "kimi-k9"])
+        self.assertEqual(window.cleanup_opencode_model.currentText(),
+                         "my-own-model")
+
+    def test_opencode_s_list_arriving_at_open_leaves_the_other_boxes_alone(self):
+        conf = self.config(cleanup_opencode_model="my-own-model",
+                           meeting_model="some/meeting-model")
+        window = self.window(conf)
+        before = [window.meeting_model.itemText(i)
+                  for i in range(window.meeting_model.count())]
+        window._on_hosted_models_loaded("opencode", ["glm-5.3", "kimi-k3"])
+        combo = window.cleanup_opencode_model
+        offered = [combo.itemText(i) for i in range(combo.count())]
+        self.assertEqual(offered, ["glm-5.3", "kimi-k3"])
+        self.assertEqual(combo.currentText(), "my-own-model")
+        self.assertEqual([window.meeting_model.itemText(i)
+                          for i in range(window.meeting_model.count())], before)
+
+    def test_opencode_cleanup_offers_a_fetch_button_of_its_own(self):
+        """The OpenRouter button leaves the screen with its box, so OpenCode Go
+        carries its own."""
+        window = self.window(cfg.Config())
+        window._select_data(window.cleanup_provider, "opencode")
+        self.assertFalse(window.cleanup_opencode_model_row.isHidden())
+        self.assertTrue(window.cleanup_model_row.isHidden())
+
+    def test_agy_answering_refills_both_of_its_boxes(self):
+        """The same arrangement as Codex: both boxes, nothing chosen is lost."""
+        conf = self.config(cleanup_agy_model="my-own-model")
+        window = self.window(conf)
+        window._on_agy_models_loaded(["gemini-4-flash-low", "gemini-4-pro-low"])
+        for combo in (window.cleanup_agy_model, window.assistant_agy_model):
+            with self.subTest(combo=combo.objectName() or "combo"):
+                offered = [combo.itemText(i) for i in range(combo.count())]
+                self.assertEqual(offered[1:],
+                                 ["gemini-4-flash-low", "gemini-4-pro-low"])
+        self.assertEqual(window.cleanup_agy_model.currentText(), "my-own-model")
+
+    def test_openrouter_s_list_arriving_at_open_refills_cleanup_and_meetings(self):
+        conf = self.config(cleanup_model="my/own-model")
+        window = self.window(conf)
+        window._on_hosted_models_loaded("openrouter", ["a/one", "b/two"])
+        for combo in (window.cleanup_model, window.meeting_model):
+            with self.subTest(combo=combo.objectName() or "combo"):
+                offered = [combo.itemText(i) for i in range(combo.count())]
+                self.assertEqual(offered, ["a/one", "b/two"])
+        self.assertEqual(window.cleanup_model.currentText(), "my/own-model")
+
+    def test_google_s_list_arriving_at_open_refills_its_own_box_only(self):
+        window = self.window(self.config(cleanup_gemini_model="gemini-x"))
+        before = window.cleanup_model.count()
+        window._on_hosted_models_loaded("gemini", ["gemini-4-flash"])
+        offered = [window.cleanup_gemini_model.itemText(i)
+                   for i in range(window.cleanup_gemini_model.count())]
+        self.assertEqual(offered, ["gemini-4-flash"])
+        self.assertEqual(window.cleanup_gemini_model.currentText(), "gemini-x")
+        self.assertEqual(window.cleanup_model.count(), before)
+
+    def test_no_key_no_call_home_at_open(self):
+        """Opening Settings is not consent to be talked about to two vendors."""
+        window = self.window(self.config())
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(settings_ui.threading, "Thread") as thread:
+            REAL_LOAD_HOSTED_MODELS(window)
+        thread.assert_not_called()
+
+    def test_a_key_on_file_is_fetched_with_at_open(self):
+        window = self.window(self.config(openrouter_api_key="sk-or-x",
+                                         gemini_api_key="AIza-x",
+                                         opencode_api_key="opencode-x"))
+        with mock.patch.object(settings_ui.threading, "Thread") as thread:
+            REAL_LOAD_HOSTED_MODELS(window)
+        self.assertEqual(thread.call_count, 3)
+
+    def test_the_update_line_names_the_version_that_is_running(self):
+        window = self.window(cfg.Config())
+        self.assertIn(settings_ui.__version__, window.update_status.text())
+        # Nothing to open until a check has found something to open.
+        self.assertTrue(window.update_page.isHidden())
+
+    def test_a_newer_release_puts_the_page_button_on_screen(self):
+        window = self.window(cfg.Config())
+        told = []
+        window.update_found.connect(told.append)
+        release = update.Release("9.9.9", "https://example.invalid/9.9.9", "")
+        window._on_update_checked(release, "")
+        self.assertIn("9.9.9", window.update_status.text())
+        self.assertFalse(window.update_page.isHidden())
+        self.assertEqual(window._release_url, release.url)
+        # And the tray hears about it from here rather than waiting a day.
+        self.assertEqual(told, [release])
+
+    def test_a_check_that_failed_says_why_and_hands_the_button_back(self):
+        window = self.window(cfg.Config())
+        window.update_now.setEnabled(False)
+        window._on_update_checked(None, "api.github.com answered HTTP 403.")
+        self.assertIn("403", window.update_status.text())
+        self.assertTrue(window.update_now.isEnabled())
 
     def test_the_settings_the_window_does_not_show_are_left_alone(self):
         """A tab nobody wrote must not reset what the command line set."""
@@ -178,16 +558,48 @@ class Settings(DikteTest):
         window = self.window(cfg.Config())
         self.assertEqual(set(window._shortcut_rows), set(hotkey.SHORTCUTS))
 
+    def shortcut_tab_text(self, window):
+        """Everything the shortcut tab says, as one string."""
+        return "\n".join(
+            widget.text() for widget in
+            window.findChildren(settings_ui.QLabel)
+            + window.findChildren(settings_ui.QLineEdit)
+            + window.findChildren(settings_ui.QPushButton)
+        )
+
+    def test_the_shortcut_tab_talks_about_this_session_and_no_other(self):
+        """A desktop with no registry is told the truth: nothing is installed
+        anywhere, Dikte is listening, and here is the command to bind if the
+        desktop should own the keys instead. It used to be promised a KWin that
+        was not running."""
+        window = self.window(cfg.Config())
+        text = self.shortcut_tab_text(window)
+        self.assertIn("i3 keeps no shortcut registry", text)
+        self.assertNotIn("KWin", text)
+        self.assertIn(ipc.command_for("toggle"), text)
+        # Not a choice to offer where it is the only mechanism there is.
+        self.assertTrue(window.evdev_enabled.isHidden())
+        self.assertFalse([button for button in
+                          window.findChildren(settings_ui.QPushButton)
+                          if "install" in button.text().lower()])
+
     def test_emptying_a_shortcut_turns_it_off_but_not_the_toggle(self):
         """The application is unusable without the toggle, so that one box
-        falls back. The rest stay empty, which is how they are switched off."""
+        falls back. The rest stay empty, which is how they are switched off.
+
+        Which combination it falls back to is the platform's and is pinned in
+        test_hotkey; MacSettings runs this too, and there the answer is not
+        Ctrl+Space.
+        """
         conf = cfg.Config()
         window = self.window(conf)
         for box, _status, _missing in window._shortcut_rows.values():
             box.setCurrentText("")
         window._save()
-        self.assertEqual(conf["shortcut"], "Ctrl+Space")
+        self.assertTrue(conf["shortcut"])
+        self.assertEqual(conf["shortcut"], hotkey.default_combo("toggle"))
         self.assertEqual(conf["cancel_shortcut"], "")
+        self.assertEqual(conf["pause_shortcut"], "")
         self.assertEqual(conf["assistant_shortcut"], "")
         self.assertEqual(conf["meeting_shortcut"], "")
 
@@ -228,7 +640,8 @@ class Settings(DikteTest):
         """The boxes still hold the previous language's text when Save runs.
         Storing that would freeze the prompt: it would look like something
         typed by hand and stop following the language for good."""
-        conf = cfg.Config()                      # ships dictating Turkish
+        self.write_config({"language": "tr"})  # the default is "auto" now
+        conf = cfg.Config()
         window = self.window(conf)
         self.assertEqual(window.cleanup_prompt.toPlainText().strip(),
                          cfg.CLEANUP_PROMPT_TR)
@@ -266,6 +679,20 @@ class Settings(DikteTest):
         self.assertEqual(conf["transcribe_provider"], "openrouter")
         self.assertEqual(conf["transcribe_model"], "gpt-4o-transcribe")
         self.assertEqual(conf["groq_transcribe_model"], "whisper-large-v3")
+
+    def test_the_file_model_is_saved_and_only_shown_for_openrouter(self):
+        self.write_config({"transcribe_provider": "openrouter",
+                           "openrouter_file_model": "openai/whisper-large-v3"})
+        conf = cfg.Config()
+        window = self.window(conf)
+        self.assertEqual(window.file_model.currentText(), "openai/whisper-large-v3")
+        self.assertTrue(window.stt_form.isRowVisible(window.file_model_row))
+        window.file_model.setCurrentText(" deepgram/nova-3 ")
+        window._save()
+        self.assertEqual(conf["openrouter_file_model"], "deepgram/nova-3")
+        window.transcribe_provider.setCurrentIndex(
+            window.transcribe_provider.findData("openai"))
+        self.assertFalse(window.stt_form.isRowVisible(window.file_model_row))
 
     def test_the_provider_box_offers_every_provider_config_knows(self):
         window = self.window(cfg.Config())
@@ -371,7 +798,16 @@ class MacSettings(Settings):
     def test_the_listener_is_not_offered_as_a_choice(self):
         """It is the whole mechanism there; turning it off would leave nothing."""
         window = self.window(cfg.Config())
-        self.assertFalse(window.evdev_enabled.isVisible())
+        self.assertTrue(window.evdev_enabled.isHidden())
+
+    def test_the_shortcut_tab_talks_about_this_session_and_no_other(self):
+        """Carbon holds the keys here, so there is no command to bind and no
+        /dev/input to be let into."""
+        window = self.window(cfg.Config())
+        text = self.shortcut_tab_text(window)
+        self.assertIn("Dikte asks macOS for these combinations", text)
+        self.assertNotIn("KWin", text)
+        self.assertNotIn(ipc.command_for("toggle"), text)
 
     def test_the_paste_keys_on_offer_are_the_ones_a_mac_uses(self):
         window = self.window(cfg.Config())
@@ -379,6 +815,342 @@ class MacSettings(Settings):
                    for index in range(window.paste_shortcut.count())]
         self.assertEqual(offered, paste.MACOS.shortcuts)
 
+
+class KdeSettings(Settings):
+    """The same window on the one desktop that keeps a registry and makes you
+    wait for it. Nothing here is about KDE: it is the rest of the window,
+    checked on the platform where Install, Remove and the listener's own
+    checkbox are all on screen."""
+
+    desktop = "KDE"
+    tools: ClassVar[tuple] = ("kwriteconfig6",)
+
+    def test_the_shortcut_tab_talks_about_this_session_and_no_other(self):
+        window = self.window(cfg.Config())
+        text = self.shortcut_tab_text(window)
+        self.assertIn("KWin only reads shortcut settings at startup", text)
+        self.assertIn("Install as a KDE shortcut", text)
+        self.assertNotIn("keeps no shortcut registry", text)
+        self.assertNotIn(ipc.command_for("toggle"), text)
+        # Here it is a choice: the wait for the next login, or the key press
+        # reaching the focused application as well.
+        self.assertFalse(window.evdev_enabled.isHidden())
+
+
+
+
+class FakeAppKit:
+    """The Objective-C runtime, answering rather than being asked.
+
+    Stands in for what mac_window._appkit() loads, so what the indicator's
+    window would have been sent can be read off `told` on any machine. The
+    selectors come back as the names they were registered under, which is what
+    lets the tests below name the message they mean.
+    """
+
+    def __init__(self, window=4242, panel=True, mask=0xe):
+        self.objc = self
+        self.window, self.panel, self.mask = window, panel, mask
+        self.told = {}
+
+    def objc_getClass(self, name):
+        return 1 if name == b"NSPanel" else 0
+
+    def selector(self, name):
+        return name.decode()
+
+    def shared(self, _class_name, _selector):
+        return 1
+
+    def ask(self, _to, selector):
+        return self.window if selector == "window" else 0
+
+    def ask_unsigned(self, _to, _selector):
+        return self.mask
+
+    def ask_of_class(self, _to, _selector, _klass):
+        return self.panel
+
+    def tell_bool(self, _to, selector, value):
+        self.told[selector] = value
+
+    tell_unsigned = tell_bool
+
+
+class MacIndicatorWindow(DikteTest):
+    """Which of the three AppKit settings the indicator's window is sent.
+
+    The nonactivating bit is the one worth a test of its own: it is legal on an
+    NSPanel and nowhere else, and sending it to a plain NSWindow raises an
+    Objective-C exception, which through ctypes is not something Python can
+    catch. It takes the whole process down. `_is_panel` is the only thing
+    standing between the two, so what it answers has to decide what is sent.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from dikte import mac_window
+        self.mac_window = mac_window
+        self.patch_attr(mac_window.QGuiApplication, "platformName",
+                        staticmethod(lambda: "cocoa"))
+
+    def told(self, **kwargs):
+        """What keep_on_screen sends an indicator, against this AppKit."""
+        appkit = FakeAppKit(**kwargs)
+        self.patch_attr(self.mac_window, "_appkit", lambda: appkit)
+        widget = overlay_module.Overlay()
+        self.addCleanup(widget.deleteLater)
+        self.addCleanup(widget.close)
+        self.answered = self.mac_window.keep_on_screen(widget)
+        return appkit.told
+
+    def test_a_window_that_is_not_a_panel_is_never_sent_the_style_mask(self):
+        """The message that would kill the process. The other two still go."""
+        told = self.told(panel=False)
+        self.assertTrue(self.answered)
+        self.assertNotIn("setStyleMask:", told)
+        self.assertIs(told["setHidesOnDeactivate:"], False)
+        self.assertEqual(told["setCollectionBehavior:"],
+                         self.mac_window.BEHAVIOUR)
+
+    def test_a_panel_without_the_bit_is_sent_the_mask_with_it_added(self):
+        told = self.told(panel=True, mask=0xe)
+        self.assertEqual(told["setStyleMask:"],
+                         0xe | self.mac_window.NONACTIVATING_PANEL)
+
+    def test_a_panel_that_already_has_the_bit_is_left_alone(self):
+        """Every dictation runs this again, and a mask Cocoa did not need is a
+        window it rebuilds underneath the indicator."""
+        told = self.told(panel=True,
+                         mask=0xe | self.mac_window.NONACTIVATING_PANEL)
+        self.assertNotIn("setStyleMask:", told)
+
+    def test_a_window_the_view_does_not_have_yet_is_not_messaged(self):
+        self.assertEqual(self.told(window=0), {})
+        self.assertFalse(self.answered)
+
+    def test_nothing_is_sent_anywhere_but_cocoa(self):
+        """Every other platform hands out a winId that means something else
+        entirely, and messaging it crashes the run."""
+        self.patch_attr(self.mac_window.QGuiApplication, "platformName",
+                        staticmethod(lambda: "offscreen"))
+        self.assertEqual(self.told(), {})
+        self.assertFalse(self.answered)
+
+
+class GivingTheFrontBack(DikteTest):
+    """Opening the microphone brings Dikte to the front, and the window the
+    user was dictating into goes inactive with the caret in it. Nothing can be
+    asked of the capture session, so the front is put back afterwards.
+
+    The watch is driven by hand here: what matters is what it decides, not how
+    long Qt takes to tick.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from dikte import app as dikte_module
+        from dikte import mac_window
+        self.dikte = dikte_module
+        self.activated = []
+        self.patch_attr(mac_window, "activate", self.activate)
+        self.ticks = []
+        outer = self
+
+        class FakeTimer:
+            """Records what it was asked to do and hands over the tick."""
+
+            def __init__(self, _parent):
+                self.interval = None
+                self.running = False
+                outer.ticks.append(self)
+
+            def setInterval(self, milliseconds):
+                self.interval = milliseconds
+
+            def start(self):
+                self.running = True
+
+            def stop(self):
+                self.running = False
+
+            @property
+            def timeout(self):
+                return self
+
+            def connect(self, slot):
+                self.tick = slot
+
+        self.patch_attr(dikte_module, "QTimer", FakeTimer)
+
+        class BareDikte:
+            """As much of the application as this one method touches."""
+
+            app = None
+            _front_watch = None
+            _the_front = dikte_module.Dikte._the_front
+            _give_the_front_back = dikte_module.Dikte._give_the_front_back
+            _stop_watching_the_front = dikte_module.Dikte._stop_watching_the_front
+
+        self.bare = BareDikte
+
+    def activate(self, pid):
+        self.activated.append(pid)
+        return True
+
+    def watching(self, was_in_front, dikte_in_front, on=None):
+        from dikte import mac_window
+        self.patch_attr(mac_window, "is_frontmost", lambda: dikte_in_front)
+        dikte = on if on is not None else self.bare()
+        dikte._give_the_front_back(was_in_front)
+        return self.ticks[-1] if self.ticks else None
+
+    def test_the_front_goes_back_to_whoever_had_it(self):
+        watch = self.watching(4242, dikte_in_front=True)
+        watch.tick()
+        self.assertEqual(self.activated, [4242])
+        self.assertTrue(watch.running)    # accepted is not the same as landed
+        self.patch_attr(self.mac_window_module(), "is_frontmost", lambda: False)
+        watch.tick()
+        self.assertFalse(watch.running)
+
+    def test_an_accepted_restore_is_not_sent_again_while_it_is_landing(self):
+        watch = self.watching(4242, dikte_in_front=True)
+        watch.tick()
+        watch.tick()
+        self.assertEqual(self.activated, [4242])
+        self.assertTrue(watch.running)
+
+    def test_an_accepted_restore_that_never_lands_still_times_out(self):
+        watch = self.watching(4242, dikte_in_front=True)
+        watch.tick()
+        with mock.patch.object(self.dikte.time, "monotonic",
+                               return_value=self.dikte.time.monotonic() + 60):
+            watch.tick()
+        self.assertFalse(watch.running)
+        self.assertEqual(self.activated, [4242])
+
+    def test_a_restore_the_system_refused_is_retried(self):
+        from dikte import mac_window
+        self.patch_attr(mac_window, "activate",
+                        lambda pid: self.activated.append(pid) or False)
+        watch = self.watching(4242, dikte_in_front=True)
+        watch.tick()
+        watch.tick()
+        self.assertEqual(self.activated, [4242, 4242])
+        self.assertTrue(watch.running)
+
+    def test_a_front_that_was_never_taken_is_left_where_it_is(self):
+        """The microphone does not always take it, and pulling an application
+        forward that is already there is one flicker for nothing."""
+        watch = self.watching(4242, dikte_in_front=False)
+        watch.tick()
+        self.assertEqual(self.activated, [])
+        self.assertTrue(watch.running)    # still waiting for the moment
+
+    def test_it_gives_up_rather_than_watching_for_ever(self):
+        watch = self.watching(4242, dikte_in_front=False)
+        with mock.patch.object(self.dikte.time, "monotonic",
+                               return_value=self.dikte.time.monotonic() + 60):
+            watch.tick()
+        self.assertFalse(watch.running)
+        self.assertEqual(self.activated, [])
+
+    def test_a_dictation_started_in_dikte_itself_watches_nothing(self):
+        """Settings is a window of ours, and the front is already where it
+        belongs."""
+        self.assertIsNone(self.watching(os.getpid(), dikte_in_front=True))
+
+    def test_a_second_recording_calls_off_the_watch_the_first_one_left(self):
+        """The older watch remembers where the older recording started, and by
+        now that is the wrong window to be pulling forward."""
+        dikte = self.bare()
+        first = self.watching(4242, dikte_in_front=False, on=dikte)
+        second = self.watching(1111, dikte_in_front=False, on=dikte)
+        self.assertFalse(first.running)
+        self.assertTrue(second.running)
+        second.tick()                      # and the survivor is the new one
+        self.patch_attr(self.mac_window_module(), "is_frontmost", lambda: True)
+        second.tick()
+        self.assertEqual(self.activated, [1111])
+
+    def test_a_recording_nobody_needs_watching_for_still_calls_off_the_old_one(self):
+        """Starting the next one from Dikte's own window is not a reason to
+        leave the last one's watch running."""
+        dikte = self.bare()
+        first = self.watching(4242, dikte_in_front=False, on=dikte)
+        self.watching(os.getpid(), dikte_in_front=False, on=dikte)
+        self.assertFalse(first.running)
+        self.assertIsNone(dikte._front_watch)
+
+    def test_nobody_in_front_is_nobody_to_go_back_to(self):
+        self.assertIsNone(self.watching(None, dikte_in_front=True))
+
+    def mac_window_module(self):
+        from dikte import mac_window
+        return mac_window
+
+
+class EveryRecordingProtectsTheFront(DikteTest):
+    """Three ways in, dictation, agent and meeting, and all three open the same
+    avfoundation capture, so all three take the front the same way. What is
+    checked here is the order: the front has to be noted before the microphone
+    is opened, and the watch armed after, or there is nothing to go back to.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from dikte import app as dikte_module
+        self.dikte = dikte_module
+        self.order = []
+
+    def app(self, **attributes):
+        """A Dikte that records the order it does things in, and nothing else.
+
+        The methods under test are called unbound against it, so the stand-ins
+        go on the object rather than on the class.
+        """
+        dikte = mock.Mock(**attributes)
+        dikte._run_id = 0
+        dikte.conf = {"mic_target": "", "max_seconds": 60,
+                      "meeting_mic_target": "", "meeting_system_target": "",
+                      "meeting_max_seconds": 60}
+        dikte._the_front.side_effect = lambda: self.order.append("noted") or 4242
+        dikte._give_the_front_back.side_effect = (
+            lambda pid: self.order.append(f"watching {pid}"))
+        dikte._begin_recording = (
+            lambda owner: self.dikte.Dikte._begin_recording(dikte, owner))
+        dikte.recorder.start.side_effect = (
+            lambda *_a: self.order.append("microphone"))
+        dikte.meeting_recorder.start.side_effect = (
+            lambda *_a: self.order.append("microphone"))
+        return dikte
+
+    def test_a_dictation_notes_the_front_before_the_indicator_is_even_shown(self):
+        dikte = self.app(state=self.dikte.IDLE, recording=False)
+        dikte.overlay.show_recording.side_effect = (
+            lambda *_a: self.order.append("indicator"))
+        self.dikte.Dikte.start(dikte)
+        self.assertEqual(self.order,
+                         ["noted", "indicator", "microphone", "watching 4242"])
+
+    def test_the_agent_does_the_same(self):
+        dikte = self.app(ask_state=self.dikte.IDLE, recording=False)
+        self.dikte.Dikte.start_ask(dikte)
+        self.assertEqual(self.order, ["noted", "microphone", "watching 4242"])
+
+    def test_a_meeting_does_the_same(self):
+        """The one most worth protecting: the user is in a call."""
+        dikte = self.app(meeting_state=self.dikte.M_IDLE)
+        dikte.meeting_recorder.active = True
+        self.dikte.Dikte.start_meeting(dikte)
+        self.assertEqual(self.order, ["noted", "microphone", "watching 4242"])
+
+    def test_a_meeting_whose_microphone_never_opened_watches_nothing(self):
+        dikte = self.app(meeting_state=self.dikte.M_IDLE)
+        dikte.meeting_recorder.active = False
+        self.dikte.Dikte.start_meeting(dikte)
+        self.assertEqual(self.order, ["noted", "microphone"])
 
 class Overlay(DikteTest):
     def overlay(self, **kwargs):
@@ -424,6 +1196,27 @@ class Overlay(DikteTest):
         widget._conceal()
         self.assertFalse(widget.showing)
 
+    def test_a_held_recording_says_so_and_stops_moving(self):
+        """Everything about the ribbon says a recording is running; a pause the
+        ribbon did not show would leave all of it saying the opposite."""
+        widget = self.overlay()
+        widget.show_recording()
+        widget.push_level(0.8)
+        widget.set_paused(True)
+        levels = list(widget.levels)
+        widget._tick()
+        self.assertEqual(widget.levels, levels)
+        widget.set_paused(False)
+        widget._tick()
+        self.assertNotEqual(widget.levels, levels)
+
+    def test_a_new_recording_is_never_the_last_one_still_held(self):
+        widget = self.overlay()
+        widget.show_recording()
+        widget.set_paused(True)
+        widget.show_recording()
+        self.assertFalse(widget.paused)
+
     def test_a_meeting_shows_both_sides(self):
         widget = self.overlay()
         widget.show_meeting()
@@ -436,6 +1229,132 @@ class Overlay(DikteTest):
                 widget = self.overlay(corner=corner)
                 widget.show_recording()
                 widget._reposition()
+
+    def test_a_named_screen_is_used_instead_of_the_pointer_screen(self):
+        screen = mock.Mock()
+        screen.name.return_value = "DP-1"
+        screen.availableGeometry.return_value = settings_ui.QRect(1920, 0, 1920, 1080)
+        widget = self.overlay(screen_name="DP-1")
+        with mock.patch.object(QApplication, "screens", return_value=[screen]), \
+                mock.patch.object(QApplication, "screenAt") as screen_at:
+            widget._reposition()
+        screen_at.assert_not_called()
+        self.assertEqual(widget.pos(), QPoint(1948, 1003))
+
+    def _screen(self, name, area):
+        screen = mock.Mock()
+        screen.name.return_value = name
+        screen.availableGeometry.return_value = area
+        return screen
+
+    def _kwin(self, *answer):
+        kwin = mock.Mock()
+        kwin.isValid.return_value = True
+        kwin.call.return_value.arguments.return_value = list(answer)
+        return kwin
+
+    def test_the_compositor_says_which_screen_the_pointer_is_on(self):
+        """Wayland tells a client where the pointer is only while it is over one
+        of that client's own windows, so QCursor.pos() comes back at the origin
+        and every indicator lands on whichever screen holds it. KWin knows."""
+        screens = [self._screen("DP-1", settings_ui.QRect(0, 0, 1920, 1080)),
+                   self._screen("DP-2", settings_ui.QRect(1920, 0, 1920, 1080))]
+        widget = self.overlay()
+        with mock.patch.object(overlay_module, "_kwin", self._kwin("DP-2")), \
+                mock.patch.object(QApplication, "screens", return_value=screens), \
+                mock.patch.object(QApplication, "screenAt") as screen_at:
+            widget._reposition()
+        screen_at.assert_not_called()
+        self.assertEqual(widget.pos(), QPoint(1948, 1003))
+
+    def test_the_pointer_decides_when_the_compositor_will_not_say(self):
+        """Every desktop but Plasma, and Plasma while KWin is being replaced."""
+        screens = [self._screen("DP-1", settings_ui.QRect(0, 0, 1920, 1080))]
+        widget = self.overlay()
+        with mock.patch.object(overlay_module, "_kwin", self._kwin()), \
+                mock.patch.object(QApplication, "screens", return_value=screens), \
+                mock.patch.object(QApplication, "screenAt",
+                                  return_value=screens[0]) as screen_at:
+            widget._reposition()
+        screen_at.assert_called()
+        self.assertEqual(widget.pos(), QPoint(28, 1003))
+
+    def _two_screens(self):
+        return [self._screen("DP-1", settings_ui.QRect(0, 0, 1920, 1080)),
+                self._screen("DP-2", settings_ui.QRect(1920, 0, 1920, 1080))]
+
+    def _ticks_on(self, widget, screens, kwin):
+        """Run the ribbon long enough for one look at where the pointer is."""
+        with mock.patch.object(overlay_module, "_kwin", kwin), \
+                mock.patch.object(QApplication, "screens", return_value=screens), \
+                mock.patch.object(QApplication, "screenAt", return_value=screens[0]):
+            for _ in range(overlay_module.FOLLOW_EVERY):
+                widget._tick()
+
+    def test_it_can_be_told_to_keep_up_with_the_pointer(self):
+        """The screen it started on is not always the screen you end up on."""
+        screens = self._two_screens()
+        kwin = self._kwin("DP-2")
+        widget = self.overlay(follow_pointer=True)
+        with mock.patch.object(overlay_module, "_kwin", kwin), \
+                mock.patch.object(QApplication, "screens", return_value=screens):
+            widget.show_recording()
+        self.assertEqual(widget.pos(), QPoint(1948, 1003))
+        kwin.call.return_value.arguments.return_value = ["DP-1"]
+        self._ticks_on(widget, screens, kwin)
+        self.assertEqual(widget.pos(), QPoint(28, 1003))
+
+    def test_it_stays_where_it_appeared_unless_it_was_told_otherwise(self):
+        """Left off, because an indicator that jumps desks mid-sentence is one
+        more thing moving while you are trying to talk."""
+        screens = self._two_screens()
+        kwin = self._kwin("DP-2")
+        widget = self.overlay()
+        with mock.patch.object(overlay_module, "_kwin", kwin), \
+                mock.patch.object(QApplication, "screens", return_value=screens):
+            widget.show_recording()
+        kwin.call.return_value.arguments.return_value = ["DP-1"]
+        self._ticks_on(widget, screens, kwin)
+        self.assertEqual(widget.pos(), QPoint(1948, 1003))
+
+    def test_a_named_screen_is_never_left_for_the_pointer(self):
+        """Naming one is the whole answer; following it would undo the naming."""
+        screens = self._two_screens()
+        kwin = self._kwin("DP-2")
+        widget = self.overlay(screen_name="DP-1", follow_pointer=True)
+        with mock.patch.object(QApplication, "screens", return_value=screens):
+            widget.show_recording()
+        self._ticks_on(widget, screens, kwin)
+        kwin.call.assert_not_called()
+        self.assertEqual(widget.pos(), QPoint(28, 1003))
+
+    def test_the_one_on_top_goes_where_the_one_underneath_is(self):
+        """Asking for itself would put the pair on two monitors, with this one
+        raised over a ribbon that is not underneath it."""
+        screens = self._two_screens()
+        kwin = self._kwin("DP-2")
+        first = self.overlay()
+        with mock.patch.object(overlay_module, "_kwin", kwin), \
+                mock.patch.object(QApplication, "screens", return_value=screens):
+            first.show_recording()
+            kwin.call.return_value.arguments.return_value = ["DP-1"]
+            second = self.overlay(below=first)
+            second.show_busy("Asking Claude…")
+        self.assertEqual(first.pos(), QPoint(1948, 1003))
+        self.assertEqual(second.pos(), QPoint(1948, 945))
+
+    def test_the_compositor_is_asked_only_now_and_then(self):
+        """Every tick would be thirty conversations a second about a hand
+        moving a mouse."""
+        screens = self._two_screens()
+        kwin = self._kwin("DP-2")
+        widget = self.overlay(follow_pointer=True)
+        with mock.patch.object(overlay_module, "_kwin", kwin), \
+                mock.patch.object(QApplication, "screens", return_value=screens):
+            widget.show_recording()
+        kwin.call.reset_mock()
+        self._ticks_on(widget, screens, kwin)
+        self.assertEqual(kwin.call.call_count, 1)
 
     def test_a_warning_and_an_error_both_show(self):
         widget = self.overlay()
@@ -481,12 +1400,63 @@ class Overlay(DikteTest):
         self.assertFalse(widget.muted)
 
 
+class MeetingSources(DikteTest):
+    """What the Meeting tab says about the far side, per sound system.
+
+    The box that picks it is empty on a system that cannot record it, and an
+    empty box with nothing next to it reads as a list that has not loaded yet.
+    """
+
+    def notes(self, meetings):
+        with mock.patch.object(audio, "sound",
+                               return_value=audio.PULSE._replace(
+                                   meetings=meetings)), \
+                only_these_tools(), \
+                mock.patch.object(settings_ui.SettingsWindow, "_load_models"), \
+                mock.patch.object(settings_ui.SettingsWindow,
+                                  "_load_transcribe_models"), \
+                mock.patch.object(settings_ui.SettingsWindow,
+                                  "_load_codex_models"), \
+                mock.patch.object(settings_ui.SettingsWindow,
+                                  "_load_agy_models"), \
+                mock.patch.object(settings_ui.SettingsWindow,
+                                  "_load_hosted_models"):
+            window = settings_ui.SettingsWindow(cfg.Config())
+        self.addCleanup(window.deleteLater)
+        self.addCleanup(window.close)
+        return " ".join(label.text()
+                        for label in window.findChildren(settings_ui.QLabel))
+
+    def test_a_system_that_cannot_record_the_far_side_says_so(self):
+        self.assertIn("nothing that records what the speakers",
+                      self.notes(meetings=False))
+
+    def test_a_system_that_can_says_nothing_of_the_sort(self):
+        self.assertNotIn("nothing that records what the speakers",
+                         self.notes(meetings=True))
+
+
 if __name__ == "__main__":
     unittest.main()
 
 
 class LocalModels(DikteTest):
     """The download boxes, without a network and without either program."""
+
+    def setUp(self):
+        super().setUp()
+        self.enterContext(mock.patch.object(settings_ui.LocalModelBox, "_fetch_models"))
+        # A machine Dikte is actually installed on would otherwise answer the
+        # "nothing can transcribe" question from its real binary and model.
+        self.patch_attr(ggml, "BIN_DIR", self.path("bin"))
+        self.patch_attr(ggml, "MODELS_DIR", self.path("models"))
+        # And one with Codex on it would ask it for its model list.
+        self.enterContext(mock.patch.object(settings_ui.SettingsWindow,
+                                            "_load_codex_models"))
+        self.enterContext(mock.patch.object(settings_ui.SettingsWindow,
+                                            "_load_agy_models"))
+        self.enterContext(mock.patch.object(settings_ui.SettingsWindow,
+                                            "_load_hosted_models"))
 
     def window(self, conf):
         window = settings_ui.SettingsWindow(conf)
@@ -513,6 +1483,73 @@ class LocalModels(DikteTest):
             self.window(conf)._save()
         self.assertEqual(conf["local_model"], "ggml-large-v3-turbo-q5_0.bin")
 
+    def state(self, **values):
+        base = {"running": True, "pid": 3, "port": 4321, "model": "ggml-small.bin",
+                "gpu_wanted": True, "backend": "CUDA", "device": "RTX 4070",
+                "layers": "", "available": ["CUDA", "CPU"]}
+        base.update(values)
+        return base
+
+    def shown(self, **values):
+        """The line the window writes under the local model boxes."""
+        window = self.window(self.config(transcribe_provider="local"))
+        with mock.patch.object(ggml, "state",
+                               return_value={"whisper": self.state(**values),
+                                             "llama": self.state(running=False)}):
+            window._show_local_state()
+        return window.local_state.text(), window.local_llm_state.text()
+
+    def test_a_loaded_model_says_which_card_it_is_on(self):
+        whisper, llm = self.shown()
+        self.assertIn("graphics card", whisper)
+        self.assertIn("RTX 4070", whisper)
+        # The other box is about the other model, and that one is not loaded.
+        self.assertIn("Not loaded", llm)
+
+    def test_a_card_asked_for_and_missing_is_not_left_to_be_guessed_at(self):
+        whisper, _ = self.shown(backend="CPU", device="CPU", available=["CPU"])
+        self.assertIn("processor", whisper)
+        self.assertIn("only the CPU backend was loaded", whisper)
+
+    def test_a_download_is_not_assumed_to_lack_gpu_support(self):
+        whisper, _ = self.shown(backend="CPU", device="CPU", available=["CPU"],
+                                downloaded=True)
+        self.assertIn("only the CPU backend was loaded", whisper)
+        self.assertIn("driver errors", whisper)
+        self.assertNotIn("installing one", whisper)
+
+    def test_a_system_build_is_not_told_to_install_itself(self):
+        whisper, _ = self.shown(backend="CPU", device="CPU", available=["CPU"],
+                                downloaded=False)
+        self.assertIn("only the CPU backend was loaded", whisper)
+        self.assertNotIn("Dikte downloaded", whisper)
+
+    def test_a_build_that_could_have_used_one_says_the_other_thing(self):
+        whisper, _ = self.shown(backend="CPU", device="CPU",
+                                available=["CUDA", "CPU"])
+        self.assertIn("could not be used", whisper)
+        self.assertNotIn("no graphics backend", whisper)
+
+    def test_a_processor_nobody_argued_about_is_stated_plainly(self):
+        whisper, _ = self.shown(backend="CPU", device="CPU", gpu_wanted=False,
+                                available=["CPU"])
+        self.assertEqual(whisper, "Loaded on the processor (CPU).")
+
+    def test_a_server_that_said_nothing_is_not_answered_for(self):
+        """A whisper built by hand on a Mac prints no backend line at all."""
+        whisper, _ = self.shown(backend="", device="", available=[])
+        self.assertIn("did not say", whisper)
+
+    def test_the_line_stops_being_written_while_the_window_is_away(self):
+        # The events rather than show() and hide(): showing the window for real
+        # would send the same event down to the download boxes, which answer it
+        # by asking Hugging Face what models there are.
+        window = self.window(self.config(transcribe_provider="local"))
+        window.showEvent(QShowEvent())
+        self.assertTrue(window._local_state_timer.isActive())
+        window.hideEvent(QHideEvent())
+        self.assertFalse(window._local_state_timer.isActive())
+
     def test_nothing_is_fetched_for_a_window_nobody_opened(self):
         # DikteTest closes the network, so a request would fail the test. The
         # lists are asked for when the box is shown, not when it is built.
@@ -523,11 +1560,42 @@ class LocalModels(DikteTest):
         # Qt's int is C++'s 32-bit one, and a 2.3 GB model is more than fits in
         # it: the count came out the far side negative, at "-1%".
         box = self.window(cfg.Config()).local_llm
-        box._downloading = True
-        box._report(1_048_576, 2_489_757_856)
+        box._report("model", 1_048_576, 2_489_757_856)
         _app.processEvents()
         self.assertIn("2.3 GB", box.status.text())
         self.assertNotIn("-", box.status.text())
+
+    def test_each_download_reports_into_its_own_label(self):
+        """The two can run at once; the tag, not a flag read later, says
+        which label the bytes belong to."""
+        box = self.window(cfg.Config()).local_llm
+        box._report("program", 10, 100)
+        box._report("model", 20, 100)
+        _app.processEvents()
+        self.assertIn("10", box.program_label.text())
+        self.assertIn("20", box.status.text())
+
+    def test_a_download_says_something_before_the_first_byte(self):
+        # Opening the connection takes ten or twenty seconds, and the byte
+        # counts only start after it. The line underneath still read "has not
+        # been downloaded yet" beside a button that now said Stop, so a
+        # download that had started looked like a click that had not landed.
+        box = self.window(cfg.Config()).local_llm
+        box.load("", "ggml-org/SmolLM3-3B-GGUF")
+        box.repo.blockSignals(True)
+        box.repo.setCurrentText("ggml-org/SmolLM3-3B-GGUF")
+        box.repo.blockSignals(False)
+        box._on_listed([("models", [self._item("SmolLM3-Q4_K_M.gguf")],
+                         "ggml-org/SmolLM3-3B-GGUF")], "")
+        with mock.patch.object(settings_ui.threading, "Thread"):
+            box._download()
+        self.assertIn("Starting", box.status.text())
+        # And the same again for the stop, which is read between blocks and so
+        # not read at all while the connection is still being opened.
+        with mock.patch.object(settings_ui.threading, "Thread"):
+            box._download()
+        self.assertTrue(box._stop)
+        self.assertIn("Stopping", box.status.text())
 
     def test_a_long_model_name_is_not_cut_in_half(self):
         # The list under a combo box takes the box's width and elides what does
@@ -540,6 +1608,361 @@ class LocalModels(DikteTest):
         widest = max(box.repo.fontMetrics().horizontalAdvance(box.repo.itemText(row))
                      for row in range(box.repo.count()))
         self.assertGreaterEqual(view.minimumWidth(), widest)
+
+    @staticmethod
+    def _item(name, size=1 << 20):
+        return hub.Item(name, f"https://example.invalid/{name}", size, "")
+
+    @staticmethod
+    def _rows(box):
+        """Every row's text, headings included."""
+        return [box.model.itemText(row) for row in range(box.model.count())]
+
+    @staticmethod
+    def _repos(box):
+        return [box.repo.itemText(row) for row in range(box.repo.count())]
+
+    @staticmethod
+    def _roomy():
+        """Stand on a machine with room for every suggestion.
+
+        The order the publishers come in follows the memory, so a test that
+        reads it has to say which machine it is standing on. A build runner
+        with 7 GB in it puts the two Gemma 4 rows last and is right to.
+        """
+        return mock.patch.object(ggml, "total_memory", return_value=64 << 30)
+
+    @staticmethod
+    def _offered(box):
+        """The model names in the box, headings and duplicates left out."""
+        names = []
+        for row in range(box.model.count()):
+            name = box.model.itemData(row)
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    def test_a_row_with_nothing_to_fetch_does_not_offer_a_download(self):
+        # The model the settings name is not in the list any more, so its row
+        # was rebuilt from the name alone and carries no file to fetch. The
+        # button stayed lit and the press did nothing at all.
+        box = self.window(self.config(local_llm_model="gone.gguf")).local_llm
+        box.load("gone.gguf", "ggml-org/SmolLM3-3B-GGUF")
+        self.assertEqual(box.selected(), "gone.gguf")
+        self.assertFalse(box.download_button.isEnabled())
+        self.assertIn("gone.gguf", box.status.text())
+        self.assertIn("publisher", box.status.text())
+
+    def test_a_model_without_its_program_does_not_say_it_is_ready(self):
+        # The model runs on the program above it, and "Ready" over a missing
+        # one is what had people asking why nothing transcribed.
+        box = self.window(cfg.Config()).local_whisper
+        path = ggml.whisper_model_path("ggml-small.bin")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"not really a model")
+        box.load("ggml-small.bin")
+        self.assertFalse(ggml.program_path(ggml.WHISPER))
+        self.assertNotIn("Ready", box.status.text())
+        self.assertIn("program", box.status.text())
+
+    def test_a_program_set_in_the_settings_is_not_called_downloaded(self):
+        mine = self.path("my-whisper-server")
+        mine.write_text("#!/bin/sh\n")
+        mine.chmod(0o755)
+        self.patch_attr(ggml.shutil, "which", lambda name: None)
+        box = self.window(self.config(local_binary=str(mine))).local_whisper
+        self.assertIn(str(mine), box.program_label.text())
+        self.assertFalse(box.install_button.isVisibleTo(box))
+
+    def test_a_model_over_a_program_set_by_hand_is_ready(self):
+        # The program is there, it is just named by the settings rather than
+        # downloaded, and the status line looked past it.
+        mine = self.path("my-whisper-server")
+        mine.write_text("#!/bin/sh\n")
+        mine.chmod(0o755)
+        self.patch_attr(ggml.shutil, "which", lambda name: None)
+        path = ggml.whisper_model_path("ggml-small.bin")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"not really a model")
+        box = self.window(self.config(local_binary=str(mine))).local_whisper
+        box.load("ggml-small.bin")
+        self.assertIn("Ready", box.status.text())
+
+    def test_changing_the_publisher_changes_the_model(self):
+        # The model chosen under the old publisher is not published by the new
+        # one. Carried over, it was added back as "not downloaded" and selected
+        # again, and the box looked as though the change had not taken.
+        box = self.window(self.config(local_llm_model="gemma-3-4b-it-Q4_K_M.gguf",
+                                      local_llm_repo="ggml-org/gemma-3-4b-it-GGUF")).local_llm
+        box.load("gemma-3-4b-it-Q4_K_M.gguf", "ggml-org/gemma-3-4b-it-GGUF")
+        box.repo.blockSignals(True)
+        box.repo.setCurrentText("ggml-org/SmolLM3-3B-GGUF")
+        box.repo.blockSignals(False)
+        box._on_listed([("models", [self._item("SmolLM3-Q4_K_M.gguf")],
+                         "ggml-org/SmolLM3-3B-GGUF")], "")
+        self.assertEqual(box.selected(), "SmolLM3-Q4_K_M.gguf")
+        self.assertEqual(self._offered(box), ["SmolLM3-Q4_K_M.gguf"])
+
+    def test_a_list_for_a_publisher_that_is_no_longer_chosen_is_dropped(self):
+        # Every change starts its own request, and they do not come back in the
+        # order they went out.
+        box = self.window(cfg.Config()).local_llm
+        box.load("", "ggml-org/SmolLM3-3B-GGUF")
+        box.repo.blockSignals(True)
+        box.repo.setCurrentText("ggml-org/SmolLM3-3B-GGUF")
+        box.repo.blockSignals(False)
+        box._on_listed([("models", [self._item("SmolLM3-Q4_K_M.gguf")],
+                         "ggml-org/SmolLM3-3B-GGUF")], "")
+        box._on_listed([("models", [self._item("gemma-3-4b-it-Q4_K_M.gguf")],
+                         "ggml-org/gemma-3-4b-it-GGUF")], "")
+        self.assertEqual(box.selected(), "SmolLM3-Q4_K_M.gguf")
+
+    def test_the_publisher_box_is_not_asked_on_every_keystroke(self):
+        box = self.window(cfg.Config()).local_llm
+        with mock.patch.object(box, "_fetch_models") as fetch:
+            for text in ("g", "gg", "ggm", "ggml-org/SmolLM3-3B-GGUF"):
+                box.repo.setCurrentText(text)
+            fetch.assert_not_called()
+            box._later.setInterval(0)
+            box._later.start()
+            _app.processEvents()
+            time.sleep(0.05)
+            _app.processEvents()
+        self.assertEqual(fetch.call_count, 1)
+
+    def test_reloading_settings_keeps_the_fetched_model_choices(self):
+        repo = "ggml-org/SmolLM3-3B-GGUF"
+        box = self.window(self.config(local_llm_repo=repo)).local_llm
+        box._on_listed([("models", [self._item("first.gguf"), self._item("second.gguf")], repo)], "")
+        box.load("first.gguf", repo)
+        self.assertGreaterEqual(box.model.findData("second.gguf"), 0)
+        self.assertEqual(box.selected(), "first.gguf")
+
+    def test_reload_before_repository_debounce_does_not_reuse_previous_catalog(self):
+        first_repo = "ggml-org/SmolLM3-3B-GGUF"
+        second_repo = "ggml-org/gemma-3-4b-it-GGUF"
+        box = self.window(self.config(local_llm_repo=first_repo)).local_llm
+        box._on_listed([("models", [self._item("first.gguf"), self._item("second.gguf")], first_repo)], "")
+        box.repo.setCurrentText(second_repo)
+        box.load("first.gguf", second_repo)
+        self.assertLess(box.model.findData("second.gguf"), 0)
+        self.assertTrue(box._pending)
+        self.assertFalse(box._answered)
+    def test_the_models_are_grouped_by_the_model_rather_than_by_size(self):
+        # Sorted by size alone, the turbo files land between the two medium
+        # ones, half a screen from the model they are a copy of.
+        box = self.window(cfg.Config()).local_whisper
+        with mock.patch.object(ggml, "total_memory", return_value=8 << 30), \
+                mock.patch.object(ggml, "accelerator", return_value=""):
+            box._on_listed([("models", [
+                self._item("ggml-medium-q5_0.bin", 539 << 20),
+                self._item("ggml-large-v3-turbo-q5_0.bin", 574 << 20),
+                self._item("ggml-medium-q8_0.bin", 823 << 20),
+                self._item("ggml-large-v3-turbo.bin", 1624 << 20),
+            ], "")], "")
+        rows = self._rows(box)
+        # The two medium files under one heading, the two turbo ones under
+        # theirs, and the model rather than the file deciding the order.
+        self.assertEqual(rows[rows.index("medium"):],
+                         ["medium",
+                          "ggml-medium-q5_0.bin  (539.0 MB, 5-bit)",
+                          "ggml-medium-q8_0.bin  (823.0 MB, 8-bit)",
+                          "large-v3-turbo",
+                          "ggml-large-v3-turbo-q5_0.bin  "
+                          "(574.0 MB, 5-bit, recommended)",
+                          "ggml-large-v3-turbo.bin  (1.6 GB, 16-bit)"])
+        # A heading is not a model, and nothing can be saved from one.
+        self.assertIsNone(box.model.itemData(rows.index("medium")))
+
+    def test_the_row_for_this_machine_is_on_top_and_says_so(self):
+        box = self.window(cfg.Config()).local_whisper
+        with mock.patch.object(ggml, "total_memory", return_value=8 << 30), \
+                mock.patch.object(ggml, "accelerator", return_value=""):
+            box._on_listed([("models", [
+                self._item("ggml-tiny.bin", 77 << 20),
+                self._item("ggml-large-v3-turbo-q5_0.bin", 574 << 20),
+            ], "")], "")
+        self.assertEqual(box.selected(), "ggml-large-v3-turbo-q5_0.bin")
+        self.assertEqual(box.model.itemData(1), "ggml-large-v3-turbo-q5_0.bin")
+        self.assertIn(t("recommended"), box.model.itemText(1))
+
+    def test_a_model_the_memory_cannot_hold_says_so_on_its_row(self):
+        box = self.window(cfg.Config()).local_llm
+        box.repo.blockSignals(True)
+        box.repo.setCurrentText("ggml-org/x-GGUF")
+        box.repo.blockSignals(False)
+        with mock.patch.object(ggml, "total_memory", return_value=8 << 30):
+            box._on_listed([("models", [
+                self._item("small-Q4_0.gguf", 1 << 30),
+                self._item("huge-Q8_0.gguf", 12 << 30),
+            ], "ggml-org/x-GGUF")], "")
+        rows = {box.model.itemData(row): box.model.itemText(row)
+                for row in range(box.model.count())}
+        self.assertNotIn(t("too big for this machine"), rows["small-Q4_0.gguf"])
+        self.assertIn(t("too big for this machine"), rows["huge-Q8_0.gguf"])
+
+    def test_a_recommended_row_is_not_listed_twice_after_a_download(self):
+        # It has a row of its own on top as well as one in its group, and
+        # reading the rows back the way a finished download does was doubling
+        # it in the list every time.
+        box = self.window(cfg.Config()).local_whisper
+        with self._roomy():
+            box._on_listed([("models", [
+                self._item("ggml-tiny.bin", 77 << 20),
+                self._item("ggml-large-v3-turbo-q5_0.bin", 574 << 20),
+            ], "")], "")
+            before = self._offered(box)
+            box._fill_models_from_current()
+        self.assertEqual(self._offered(box), before)
+        names = [box.model.itemData(row) for row in range(box.model.count())]
+        self.assertEqual(len([n for n in names if n]), len(before) + 1)
+
+    def test_a_processor_build_is_not_recommended_the_accurate_model(self):
+        # The Vulkan loader is on the machine but what was installed is the
+        # processor build, so there is no card in play whatever the loader
+        # says, and a 1 GB model on a processor is a wait somebody is sitting
+        # through with a sentence half typed.
+        binary = self.path("bin/whisper/v1.9.3/whisper-server")
+        binary.parent.mkdir(parents=True)
+        binary.write_text("")
+        binary.chmod(0o755)
+        self.path("bin/whisper/installed.json").write_text(json.dumps(
+            {"tag": "v1.9.3", "binary": str(binary), "backend": "processor"}))
+        self.patch_attr(ggml.shutil, "which", lambda name: None)
+        box = self.window(cfg.Config()).local_whisper
+        with mock.patch.object(ggml, "total_memory", return_value=32 << 30), \
+                mock.patch.object(ggml, "accelerator", return_value="Vulkan"):
+            self.assertEqual(box._suggested(), ggml.SUGGESTED_WHISPER)
+
+    def test_a_publisher_with_nothing_to_offer_says_why(self):
+        # Half of what ggml-org publishes is split across files or past the
+        # size cap, and an empty box read as though the click had not landed.
+        box = self.window(cfg.Config()).local_llm
+        box.repo.blockSignals(True)
+        box.repo.setCurrentText("ggml-org/gpt-oss-120b-GGUF")
+        box.repo.blockSignals(False)
+        box._on_listed([("models", [], "ggml-org/gpt-oss-120b-GGUF")], "")
+        self.assertIn("ggml-org/gpt-oss-120b-GGUF", box.status.text())
+        self.assertIn("publisher", box.status.text())
+
+    def test_an_empty_box_nobody_has_asked_yet_is_not_a_publisher_fault(self):
+        box = self.window(cfg.Config()).local_llm
+        box.load("", "ggml-org/SmolLM3-3B-GGUF")
+        self.assertNotIn("publisher", box.status.text())
+
+    def test_only_the_suggested_publishers_are_offered_to_start_with(self):
+        # Forty repository ids is not a choice anybody can make.
+        box = self.window(cfg.Config()).local_llm
+        with self._roomy():
+            box._on_listed([("repos", [ggml.SUGGESTED_LLM[0],
+                                       "ggml-org/something-else-GGUF"], "")], "")
+            self.assertEqual(self._repos(box), list(ggml.SUGGESTED_LLM))
+
+    def test_a_suggestion_missing_from_the_listing_is_still_offered(self):
+        # The listing is the forty repositories touched most recently, and a
+        # publisher that has not been updated in a season falls off it while
+        # still being the one to point at.
+        box = self.window(cfg.Config()).local_llm
+        box._on_listed([("repos", ["ggml-org/something-else-GGUF"], "")], "")
+        self.assertIn(ggml.SUGGESTED_LLM[0], self._repos(box))
+
+    def test_the_switch_brings_the_rest_and_keeps_them_apart(self):
+        box = self.window(cfg.Config()).local_llm
+        with self._roomy():
+            box._on_listed([("repos", [ggml.SUGGESTED_LLM[0],
+                                       "ggml-org/something-else-GGUF"], "")], "")
+            box.every_repo.setChecked(True)
+            rows = self._repos(box)
+        self.assertEqual(rows[:len(ggml.SUGGESTED_LLM)],
+                         list(ggml.SUGGESTED_LLM))
+        # A separator rather than a heading: the box is typed into as well as
+        # chosen from, and a heading would land in the field as a repository.
+        self.assertEqual(rows[len(ggml.SUGGESTED_LLM)], "")
+        self.assertEqual(rows[-1], "ggml-org/something-else-GGUF")
+
+    def test_a_publisher_typed_in_is_not_dropped_by_the_next_fetch(self):
+        box = self.window(cfg.Config()).local_llm
+        box.repo.blockSignals(True)
+        box.repo.setCurrentText("ggml-org/something-else-GGUF")
+        box.repo.blockSignals(False)
+        box._on_listed([("repos", [ggml.SUGGESTED_LLM[0],
+                                   "ggml-org/something-else-GGUF"], "")], "")
+        self.assertFalse(box.every_repo.isChecked())
+        self.assertIn("ggml-org/something-else-GGUF", self._repos(box))
+        self.assertEqual(box.repository(), "ggml-org/something-else-GGUF")
+
+    def test_the_chosen_publisher_is_said_in_words(self):
+        # A repository id names the publisher, the parameter count and the
+        # shape of the weights, and none of that says whether to click it.
+        box = self.window(cfg.Config()).local_llm
+        box.repo.setCurrentText(ggml.SUGGESTED_LLM[0])
+        self.assertTrue(box.repo_note.text())
+        box.repo.setCurrentText("ggml-org/nobody-wrote-a-note-GGUF")
+        self.assertEqual(box.repo_note.text(), "")
+
+    def test_the_box_says_what_this_machine_will_run_on(self):
+        box = self.window(cfg.Config()).local_whisper
+        with mock.patch.object(ggml, "accelerator", return_value="Vulkan"), \
+                mock.patch.object(ggml, "total_memory", return_value=32 << 30):
+            box._show_machine()
+        self.assertIn("Vulkan", box.machine_label.text())
+        self.assertIn("32.0 GB", box.machine_label.text())
+
+    def test_a_machine_with_no_card_is_told_it_is_on_the_processor(self):
+        box = self.window(cfg.Config()).local_whisper
+        with mock.patch.object(ggml, "accelerator", return_value=""), \
+                mock.patch.object(ggml, "total_memory", return_value=8 << 30):
+            box._show_machine()
+        self.assertIn("processor", box.machine_label.text())
+
+    def test_a_processor_build_where_the_vulkan_one_belongs_says_so(self):
+        # The Vulkan whisper-server is published by hand, and until it is
+        # there the download lands upstream's processor build. Said nowhere,
+        # an idle graphics card looks exactly like one that is being used.
+        binary = self.path("bin/whisper/v1.9.3/whisper-server")
+        binary.parent.mkdir(parents=True)
+        binary.write_text("")
+        binary.chmod(0o755)
+        self.path("bin/whisper/installed.json").write_text(json.dumps(
+            {"tag": "v1.9.3", "binary": str(binary), "backend": "processor"}))
+        # A whisper-server on this machine's PATH would win over the download.
+        self.patch_attr(ggml.shutil, "which", lambda name: None)
+        label = self.window(cfg.Config()).local_whisper.program_label.text()
+        self.assertIn("v1.9.3", label)
+        self.assertIn("Vulkan", label)
+
+    def test_an_ordinary_install_is_reported_without_a_word_about_vulkan(self):
+        binary = self.path("bin/whisper/v1.9.3/whisper-server")
+        binary.parent.mkdir(parents=True)
+        binary.write_text("")
+        binary.chmod(0o755)
+        self.path("bin/whisper/installed.json").write_text(json.dumps(
+            {"tag": "v1.9.3", "binary": str(binary)}))
+        self.patch_attr(ggml.shutil, "which", lambda name: None)
+        label = self.window(cfg.Config()).local_whisper.program_label.text()
+        self.assertIn("v1.9.3", label)
+        self.assertNotIn("Vulkan", label)
+
+    def test_a_downloaded_program_can_still_be_asked_for_again(self):
+        # The button used to disappear the moment anything landed, which left
+        # no way to pick up a newer whisper.cpp, or the Vulkan build on a
+        # machine whose driver was installed after Dikte was.
+        binary = self.path("bin/whisper/v1.9.3/whisper-server")
+        binary.parent.mkdir(parents=True)
+        binary.write_text("")
+        binary.chmod(0o755)
+        self.path("bin/whisper/installed.json").write_text(json.dumps(
+            {"tag": "v1.9.3", "binary": str(binary)}))
+        self.patch_attr(ggml.shutil, "which", lambda name: None)
+        box = self.window(cfg.Config()).local_whisper
+        self.assertTrue(box.install_button.isVisibleTo(box))
+        self.assertEqual(box.install_button.text(), t("Download again"))
+
+    def test_a_system_copy_is_not_offered_for_download(self):
+        # Nothing Dikte downloads would be run while one is on the PATH.
+        self.patch_attr(ggml.shutil, "which", lambda name: "/usr/bin/" + name)
+        box = self.window(cfg.Config()).local_whisper
+        self.assertFalse(box.install_button.isVisibleTo(box))
 
     def test_only_the_chosen_transcriber_is_on_screen(self):
         window = self.window(self.config(transcribe_provider="openai"))
@@ -558,3 +1981,61 @@ class LocalModels(DikteTest):
         self.assertFalse(window.cleanup_form.isRowVisible(window.cleanup_model_row))
         # Its own thinking box, because the two default to opposite things.
         self.assertFalse(window.cleanup_form.isRowVisible(window.cleanup_reasoning))
+
+    def test_the_idle_unload_is_offered_to_whoever_runs_a_model_here(self):
+        for transcriber, cleaner in (("local", "openrouter"),
+                                     ("openai", "local"),
+                                     ("local", "local")):
+            with self.subTest(transcriber=transcriber, cleaner=cleaner):
+                window = self.window(self.config(transcribe_provider=transcriber,
+                                                 cleanup_provider=cleaner))
+                self.assertTrue(window.local_box.isVisibleTo(window))
+
+    def test_a_machine_that_runs_neither_is_not_asked_about_memory(self):
+        window = self.window(self.config(transcribe_provider="openai",
+                                         cleanup_provider="openrouter"))
+        self.assertFalse(window.local_box.isVisibleTo(window))
+
+    def test_the_minutes_follow_the_checkbox(self):
+        window = self.window(self.config(local_idle_unload=False))
+        self.assertFalse(window.local_idle_minutes.isEnabled())
+        window.local_idle_unload.setChecked(True)
+        self.assertTrue(window.local_idle_minutes.isEnabled())
+
+    def test_each_cleaner_brings_its_own_model_row_and_no_other(self):
+        window = self.window(cfg.Config())
+        rows = {"openrouter": window.cleanup_model_row,
+                "gemini": window.cleanup_gemini_model_row,
+                "claude": window.cleanup_claude_model,
+                "codex": window.cleanup_codex_model,
+                "agy": window.cleanup_agy_model}
+        for chosen, row in rows.items():
+            with self.subTest(provider=chosen):
+                window._select_data(window.cleanup_provider, chosen)
+                for name, other in rows.items():
+                    self.assertEqual(window.cleanup_form.isRowVisible(other),
+                                     name == chosen)
+
+    def test_each_agent_brings_its_own_box_and_no_other(self):
+        window = self.window(cfg.Config())
+        boxes = {"claude": window.claude_box, "codex": window.codex_box,
+                 "agy": window.agy_box, "openrouter": window.openrouter_box}
+        for chosen, box in boxes.items():
+            with self.subTest(provider=chosen):
+                window._select_data(window.assistant_provider, chosen)
+                for name, other in boxes.items():
+                    # isHidden rather than isVisible: the window itself is never
+                    # shown in a test, so nothing in it is ever visible.
+                    self.assertEqual(other.isHidden(), name != chosen)
+
+    def test_local_threads_range_is_bounded_by_cpu_count(self):
+        with mock.patch("os.cpu_count", return_value=8):
+            window = self.window(cfg.Config())
+            self.assertEqual(window.local_threads.minimum(), 0)
+            self.assertEqual(window.local_threads.maximum(), 8)
+
+    def test_local_threads_range_has_safe_minimum_when_cpu_count_is_none(self):
+        with mock.patch("os.cpu_count", return_value=None):
+            window = self.window(cfg.Config())
+            self.assertEqual(window.local_threads.minimum(), 0)
+            self.assertEqual(window.local_threads.maximum(), 1)

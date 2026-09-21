@@ -8,15 +8,19 @@ config and now shadows the default.
 
 import json
 import os
+import pathlib
+import sys
+import threading
+import time
 import unittest
 from unittest import mock
 
-import api
-import cleanup
-import config as cfg
-import ggml
-import i18n
-import paste
+from dikte import api
+from dikte import cleanup
+from dikte import config as cfg
+from dikte import ggml
+from dikte import i18n
+from dikte import paste
 from tests.support import DikteTest
 
 
@@ -42,6 +46,21 @@ class Loading(DikteTest):
         with mock.patch("builtins.print"):
             conf = cfg.Config()
         self.assertEqual(conf["cleanup_model"], cfg.DEFAULTS["cleanup_model"])
+
+    def test_a_config_that_is_not_json_is_set_aside_as_evidence(self):
+        """Left in place it would be overwritten by the very next save."""
+        cfg.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        cfg.CONFIG_FILE.write_text("{not json", encoding="utf-8")
+        broken = cfg.CONFIG_FILE.with_suffix(".json.broken")
+        with mock.patch("builtins.print") as told:
+            conf = cfg.Config()
+        self.assertEqual(broken.read_text(encoding="utf-8"), "{not json")
+        self.assertFalse(cfg.CONFIG_FILE.exists())
+        self.assertIn(str(broken), told.call_args[0][0])
+        conf.save()
+        self.assertEqual(broken.read_text(encoding="utf-8"), "{not json")
+        self.assertEqual(self.read_config_file()["cleanup_model"],
+                         cfg.DEFAULTS["cleanup_model"])
 
     def test_a_config_that_is_json_but_not_an_object(self):
         cfg.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -89,6 +108,8 @@ class Saving(DikteTest):
         cfg.Config().save()
         self.assertTrue(cfg.CONFIG_FILE.exists())
 
+    @unittest.skipIf(sys.platform == "win32",
+                     "NTFS access is decided by ACLs, not by the mode bits")
     def test_the_file_is_readable_by_nobody_else(self):
         """It holds two API keys."""
         cfg.Config().save()
@@ -109,6 +130,41 @@ class Saving(DikteTest):
         conf["ui_language"] = "tr"
         conf.save()
         self.assertEqual(i18n.language(), "tr")
+
+    def test_the_settings_hit_the_disk_before_the_swap(self):
+        """Renaming a file still in the page cache into place makes a power
+        cut a settings wipe, which is what the atomic replace exists to stop."""
+        with mock.patch("os.fsync") as fsync:
+            cfg.Config().save()
+        fsync.assert_called_once()
+
+    def test_a_file_held_briefly_by_a_scanner_does_not_fail_the_save(self):
+        """Antivirus and sync tools on Windows hold a fresh file for a moment,
+        and the rename over it fails until they let go."""
+        attempts = []
+        real_replace = pathlib.Path.replace
+
+        def flaky(path, target):
+            attempts.append(str(target))
+            if len(attempts) < 3:
+                raise PermissionError("held by a scanner")
+            return real_replace(path, target)
+
+        with mock.patch.object(pathlib.Path, "replace", flaky), \
+                mock.patch("time.sleep"):
+            cfg.Config().save()
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(self.read_config_file()["language"],
+                         cfg.DEFAULTS["language"])
+
+    def test_a_file_held_for_good_still_raises(self):
+        def held(path, target):
+            raise PermissionError("never let go")
+
+        with mock.patch.object(pathlib.Path, "replace", held), \
+                mock.patch("time.sleep"):
+            with self.assertRaises(PermissionError):
+                cfg.Config().save()
 
 
 class Keys(DikteTest):
@@ -131,6 +187,10 @@ class Keys(DikteTest):
     def test_every_provider_falls_back_to_the_variable_of_its_own_name(self):
         with mock.patch.dict(os.environ, {"GROQ_API_KEY": "gsk-env"}):
             self.assertEqual(cfg.Config().groq_key(), "gsk-env")
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "AIza-env"}):
+            self.assertEqual(cfg.Config().gemini_key(), "AIza-env")
+        with mock.patch.dict(os.environ, {"OPENCODE_API_KEY": "opencode-env"}):
+            self.assertEqual(cfg.Config().opencode_key(), "opencode-env")
 
 
 class TranscribeTarget(DikteTest):
@@ -160,6 +220,19 @@ class TranscribeTarget(DikteTest):
         self.assertEqual(target.service, "OpenRouter")
         self.assertEqual(target.api_key, "sk-or-test")
         self.assertEqual(target.model, "openai/whisper-1")
+        self.assertEqual(target.file_model, "")
+
+    def test_openrouter_carries_its_file_model(self):
+        conf = self.config(transcribe_provider="openrouter",
+                           openrouter_api_key="sk-or-test",
+                           openrouter_file_model=" openai/whisper-large-v3 ")
+        self.assertEqual(conf.transcribe_target().file_model,
+                         "openai/whisper-large-v3")
+
+    def test_only_openrouter_has_a_file_model(self):
+        conf = self.config(transcribe_provider="openai", openai_api_key="sk-test",
+                           openrouter_file_model="openai/whisper-large-v3")
+        self.assertEqual(conf.transcribe_target().file_model, "")
 
     def test_groq_when_it_is_picked(self):
         conf = self.config(transcribe_provider="groq", groq_api_key="gsk-test",
@@ -233,6 +306,18 @@ class CleanupPrompt(DikteTest):
     def test_no_glossary_means_no_rule_about_one(self):
         self.assertEqual(self.config(language="en").cleanup_prompt(),
                          cfg.CLEANUP_PROMPT_EN)
+
+    def test_a_detected_turkish_recording_gets_the_turkish_prompt(self):
+        """Auto mode learns what was heard, and that decides the prompt rather
+        than the interface language."""
+        self.write_config({"ui_language": "en", "transcribe_prompt": "Paraşüt"})
+        conf = cfg.Config()
+        prompt = conf.cleanup_prompt(speech="tr")
+        self.assertEqual(prompt, cfg.CLEANUP_PROMPT_TR
+                         + cfg.GLOSSARY_RULE_TR.format(glossary="Paraşüt"))
+        self.assertIn("KONUŞMACININ KULLANDIĞI İSİM VE TERİMLER", prompt)
+        self.assertIn("NAMES AND TERMS THE SPEAKER USES",
+                      conf.cleanup_prompt(speech="de"))
 
     def test_subtitles_use_their_own_prompt(self):
         conf = self.config(language="en")
@@ -446,6 +531,23 @@ class History(DikteTest):
         cfg.delete_history([])
         self.assertEqual(len(cfg.read_history()), 1)
 
+    def test_amending_matches_on_content_and_patches_in_place(self):
+        rows = [self.entry("a"), self.entry("b")]
+        for row in rows:
+            cfg.append_history(row)
+        patched = cfg.amend_history(rows[0], cleanup_error="could not paste")
+        self.assertEqual(patched["cleanup_error"], "could not paste")
+        kept = cfg.read_history()
+        self.assertEqual([row["text"] for row in kept], ["a", "b"])
+        self.assertEqual(kept[0]["cleanup_error"], "could not paste")
+
+    def test_amending_a_row_a_trim_took_away_is_a_no_op(self):
+        row = self.entry("gone")
+        cfg.append_history(row)
+        cfg.clear_history()
+        self.assertIsNone(cfg.amend_history(row, cleanup_error="x"))
+        self.assertEqual(cfg.read_history(), [])
+
     def test_clearing(self):
         cfg.append_history(self.entry("a"))
         cfg.clear_history()
@@ -453,6 +555,40 @@ class History(DikteTest):
 
     def test_clearing_a_history_that_is_not_there(self):
         cfg.clear_history()   # must not raise
+
+    def test_an_append_during_a_trim_is_not_lost(self):
+        """Trim is read, cut, rewrite; a dictation appended between the read
+        and the rewrite must wait rather than be erased by a rewrite that
+        never saw it. The rewrite is slowed down to hold the race open."""
+        for index in range(10):
+            cfg.append_history(self.entry(str(index)))
+        real_write = cfg._write_history
+        rewriting = threading.Event()
+
+        def slow_write(lines):
+            rewriting.set()
+            time.sleep(0.1)
+            real_write(lines)
+
+        with mock.patch.object(cfg, "_write_history", slow_write):
+            trimmer = threading.Thread(target=cfg.trim_history, args=(3,))
+            trimmer.start()
+            # The trim now holds the lock inside its read-cut-rewrite window.
+            self.assertTrue(rewriting.wait(5))
+            appender = threading.Thread(target=cfg.append_history,
+                                        args=(self.entry("late"),))
+            appender.start()
+            trimmer.join()
+            appender.join()
+        self.assertEqual([row["text"] for row in cfg.read_history()],
+                         ["7", "8", "9", "late"])
+
+    def test_the_rewrite_hits_the_disk_before_the_swap(self):
+        for index in range(5):
+            cfg.append_history(self.entry(str(index)))
+        with mock.patch("os.fsync") as fsync:
+            cfg.trim_history(2)
+        fsync.assert_called_once()
 
 
 class Meetings(DikteTest):
@@ -526,6 +662,27 @@ class Meetings(DikteTest):
         cfg.delete_meetings([])
         self.assertEqual(len(cfg.read_meetings()), 1)
 
+    def test_the_index_hits_the_disk_before_the_swap(self):
+        with mock.patch("os.fsync") as fsync:
+            cfg.save_meeting(self.entry("a"))
+        fsync.assert_called_once()
+
+    def test_an_index_held_briefly_by_a_scanner_is_still_written(self):
+        real_replace = pathlib.Path.replace
+        attempts = []
+
+        def flaky(path, target):
+            attempts.append(str(target))
+            if len(attempts) < 3:
+                raise PermissionError("held by a scanner")
+            return real_replace(path, target)
+
+        with mock.patch.object(pathlib.Path, "replace", flaky), \
+                mock.patch("time.sleep"):
+            cfg.save_meeting(self.entry("a"))
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual([row["base"] for row in cfg.read_meetings()], ["a"])
+
 
 class Defaults(unittest.TestCase):
     """The table itself, which every command line and settings tab reads."""
@@ -545,6 +702,19 @@ class Defaults(unittest.TestCase):
     def test_the_keys_ship_empty(self):
         self.assertEqual(cfg.DEFAULTS["openai_api_key"], "")
         self.assertEqual(cfg.DEFAULTS["openrouter_api_key"], "")
+        self.assertEqual(cfg.DEFAULTS["gemini_api_key"], "")
+        self.assertEqual(cfg.DEFAULTS["opencode_api_key"], "")
+
+    def test_google_ai_studio_is_a_cleanup_provider_and_not_a_transcriber(self):
+        """Its compatible endpoint has no /audio/transcriptions behind it."""
+        self.assertNotIn("gemini", cfg.TRANSCRIBERS)
+        self.assertIn("gemini", cleanup.PROVIDERS)
+
+    def test_opencode_ships_on_its_own_endpoint(self):
+        self.assertEqual(cfg.DEFAULTS["opencode_base_url"],
+                         "https://opencode.ai/zen/go/v1")
+        self.assertEqual(cfg.DEFAULTS["cleanup_opencode_model"], "deepseek-v4-flash")
+        self.assertEqual(cfg.DEFAULTS["assistant_opencode_model"], "deepseek-v4-flash")
 
     def test_every_language_specific_prompt_has_both_languages(self):
         for name in ("CLEANUP_PROMPT", "FILE_CLEANUP_PROMPT", "MEETING_PROMPT",
@@ -557,34 +727,6 @@ class Defaults(unittest.TestCase):
         """cmd+v on a Mac, and it must be one paste.py can actually press."""
         self.assertEqual(cfg.DEFAULTS["paste_shortcut"],
                          paste.desktop().shortcuts[0])
-
-
-class Directories(unittest.TestCase):
-    """Where the settings and the recordings are kept, per system."""
-
-    def test_linux_keeps_them_apart_and_follows_xdg(self):
-        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": "/c",
-                                          "XDG_DATA_HOME": "/d"}):
-            config_dir, data_dir = cfg._directories("linux")
-        self.assertEqual(str(config_dir), "/c/dikte")
-        self.assertEqual(str(data_dir), "/d/dikte")
-
-    def test_linux_without_the_variables_set(self):
-        with mock.patch.dict(os.environ, {}, clear=True):
-            config_dir, data_dir = cfg._directories("linux")
-        self.assertTrue(str(config_dir).endswith("/.config/dikte"))
-        self.assertTrue(str(data_dir).endswith("/.local/share/dikte"))
-
-    def test_a_mac_keeps_both_in_application_support(self):
-        config_dir, data_dir = cfg._directories("darwin")
-        self.assertEqual(config_dir, data_dir)
-        self.assertTrue(str(config_dir).endswith("/Library/Application Support/Dikte"))
-
-    def test_a_mac_does_not_read_the_xdg_variables(self):
-        """A Mac with them set from some other tool still stores in one place."""
-        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": "/c"}):
-            config_dir, _ = cfg._directories("darwin")
-        self.assertNotIn("/c", str(config_dir))
 
 
 if __name__ == "__main__":
@@ -618,6 +760,9 @@ class ReadyToRun(DikteTest):
     def setUp(self):
         super().setUp()
         self.patch_attr(ggml, "MODELS_DIR", self.path("models"))
+        # A machine Dikte is actually installed on would otherwise answer for
+        # the "missing program" below through the real install record.
+        self.patch_attr(ggml, "BIN_DIR", self.path("bin"))
 
     def install(self, name):
         path = ggml.whisper_model_path(name)
@@ -655,3 +800,24 @@ class ReadyToRun(DikteTest):
         self.assertEqual(ggml.whisper.settings()["threads"], 4)
         self.assertFalse(ggml.whisper.settings()["gpu"])
         self.assertEqual(ggml.llm.settings()["context"], 4096)
+
+    def test_the_idle_window_is_in_seconds(self):
+        conf = self.config(local_idle_unload=True, local_idle_minutes=15)
+        self.assertEqual(conf.idle_seconds(), 900)
+
+    def test_an_unchecked_box_keeps_the_model(self):
+        conf = self.config(local_idle_unload=False, local_idle_minutes=15)
+        self.assertEqual(conf.idle_seconds(), 0)
+
+    def test_a_window_of_no_minutes_is_still_a_window(self):
+        """The spin box will not go below one; a config edited by hand can."""
+        conf = self.config(local_idle_unload=True, local_idle_minutes=0)
+        self.assertEqual(conf.idle_seconds(), 60)
+
+    def test_both_servers_are_told_the_window(self):
+        conf = self.config(local_idle_unload=True, local_idle_minutes=3)
+        self.addCleanup(ggml.llm.set_idle, 0)
+        self.addCleanup(ggml.whisper.set_idle, 0)
+        conf.apply_local()
+        self.assertEqual(ggml.whisper.idle, 180)
+        self.assertEqual(ggml.llm.idle, 180)

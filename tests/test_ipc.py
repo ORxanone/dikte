@@ -7,11 +7,14 @@ answers by saying nothing at all.
 
 import json
 import os
+import pathlib
+import shlex
 import sys
 import unittest
 from unittest import mock
 
-import ipc
+from dikte import ipc
+from tests.support import DikteTest
 
 
 class FakeSocket:
@@ -57,13 +60,41 @@ class FakeSocket:
 
 class Paths(unittest.TestCase):
     def test_script_path_points_at_dikte(self):
-        self.assertTrue(ipc.script_path().endswith("dikte.py"))
+        # By its parts rather than as a string: the separator is a backslash on
+        # Windows, and the path is what a shortcut there runs too.
+        path = pathlib.Path(ipc.script_path())
+        self.assertEqual(path.parts[-2:], ("dikte", "__main__.py"))
         self.assertTrue(os.path.exists(ipc.script_path()))
 
     def test_the_shortcut_command_runs_it_with_this_interpreter(self):
-        command = ipc.command_for("toggle")
-        self.assertTrue(command.startswith(sys.executable))
-        self.assertTrue(command.endswith(" toggle"))
+        # Read back through the same quoting it went out with: a Windows path
+        # is spelled with backslashes and comes out of the join quoted.
+        self.assertEqual(shlex.split(ipc.command_for("toggle")),
+                         [sys.executable, ipc.script_path(), "toggle"])
+
+    def test_a_packaged_build_names_itself_and_no_interpreter(self):
+        """There is no __main__.py on disk in one, and sys.executable is the
+        build's own binary rather than a Python anybody could run it with."""
+        with mock.patch.object(sys, "frozen", True, create=True), \
+             mock.patch.object(sys, "executable", "/Applications/Dikte.app/Contents/MacOS/Dikte"), \
+             mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(ipc.launcher(),
+                             ["/Applications/Dikte.app/Contents/MacOS/Dikte"])
+
+    def test_an_appimage_names_the_file_rather_than_this_run_s_mount(self):
+        """A shortcut written to the mount works until the next login."""
+        with mock.patch.object(sys, "frozen", True, create=True), \
+             mock.patch.object(sys, "executable", "/tmp/.mount_ab12/usr/bin/dikte"), \
+             mock.patch.dict(os.environ, {"APPIMAGE": "/home/me/Dikte.AppImage"}):
+            self.assertEqual(ipc.command_for("toggle"),
+                             "/home/me/Dikte.AppImage toggle")
+
+    def test_a_path_with_a_space_in_it_is_quoted(self):
+        """Which is every Mac, and an AppImage kept anywhere with a name."""
+        with mock.patch.object(sys, "frozen", True, create=True), \
+             mock.patch.dict(os.environ, {"APPIMAGE": "/home/me/My Things/Dikte.AppImage"}):
+            self.assertEqual(ipc.command_for("cancel"),
+                             "'/home/me/My Things/Dikte.AppImage' cancel")
 
     @unittest.skipUnless(hasattr(os, "getuid"),
                          "the socket is named after a user id, which Windows "
@@ -153,6 +184,75 @@ class Send(unittest.TestCase):
         sock = FakeSocket(reply=b'{"ok": true}\n')
         self.send(sock, "toggle")
         self.assertTrue(sock.disconnected)
+
+
+class AlreadyServing(unittest.TestCase):
+    """The single-instance check, which listen() cannot be: a Windows pipe
+    takes a second server on the same name rather than refusing it."""
+
+    def probe(self, socket):
+        with mock.patch.object(ipc, "QLocalSocket", return_value=socket):
+            return ipc.already_serving()
+
+    def test_nothing_running_means_go_ahead(self):
+        self.assertFalse(self.probe(FakeSocket(connected=False)))
+
+    def test_an_answer_means_yield(self):
+        self.assertTrue(self.probe(FakeSocket(reply=b'{"ok": true}\n')))
+
+    def test_the_probe_has_no_side_effect(self):
+        """A probe that opened a window would open it during the relaunch a
+        slow instance provokes, on top of the verb being forwarded."""
+        sock = FakeSocket(reply=b'{"ok": true}\n')
+        self.probe(sock)
+        self.assertEqual(sock.written.decode("utf-8").strip(), "status")
+
+    def test_an_instance_too_old_to_answer_still_counts_as_running(self):
+        self.assertTrue(self.probe(FakeSocket(reply=b"")))
+
+
+class InstanceLock(DikteTest):
+    def setUp(self):
+        super().setUp()
+        # The lock derives its home from paths, which DikteTest's cfg patches
+        # do not cover; without this the test would write into the real one.
+        from dikte import paths
+        self.patch_attr(paths, "DATA_DIR", self.path("data"))
+
+    def test_one_holder_at_a_time(self):
+        first = ipc.instance_lock()
+        self.assertIsNotNone(first)
+        self.assertTrue(first.tryLock(0))
+        second = ipc.instance_lock()
+        self.assertFalse(second.tryLock(0))
+        first.unlock()
+        self.assertTrue(second.tryLock(0))
+        second.unlock()
+
+    def test_the_lock_lives_in_the_data_directory(self):
+        from dikte import paths
+        lock = ipc.instance_lock()
+        self.assertTrue(lock.tryLock(0))
+        self.assertTrue((paths.DATA_DIR / "dikte.lock").exists())
+        lock.unlock()
+
+
+class Respawn(unittest.TestCase):
+    def test_windows_starts_a_detached_process_and_returns(self):
+        with mock.patch.object(sys, "platform", "win32"), \
+                mock.patch.object(ipc, "launcher", return_value=["py", "x"]), \
+                mock.patch.object(ipc.subprocess, "Popen") as popen:
+            ipc.respawn(["--gui"])
+        self.assertEqual(popen.call_args.args[0], ["py", "x", "--gui"])
+        self.assertEqual(popen.call_args.kwargs["creationflags"],
+                         0x00000008 | 0x00000200)
+
+    def test_everywhere_else_the_process_is_replaced(self):
+        with mock.patch.object(sys, "platform", "linux"), \
+                mock.patch.object(ipc, "launcher", return_value=["py", "x"]), \
+                mock.patch.object(ipc.os, "execv") as execv:
+            ipc.respawn(["toggle", "--gui"])
+        execv.assert_called_once_with("py", ["py", "x", "toggle", "--gui"])
 
 
 if __name__ == "__main__":

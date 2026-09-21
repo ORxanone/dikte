@@ -9,14 +9,23 @@ socket is faked, and everything that runs locally runs for real.
 import contextlib
 import io
 import json
+import sys
 import unittest
+import webbrowser
+from typing import ClassVar
 from unittest import mock
 
-import cli
-import config as cfg
-import hotkey
-import ipc
-from tests.support import DikteTest, fake_urlopen
+from dikte import audio
+from dikte import cleanup
+from dikte import cli
+from dikte import config as cfg
+from dikte import ggml
+from dikte import hotkey
+from dikte import hub
+from dikte import ipc
+from dikte import paste
+from dikte import update
+from tests.support import DikteTest, fake_urlopen, only_these_tools, url_error
 
 
 class Options:
@@ -139,8 +148,8 @@ class Parser(unittest.TestCase):
     def parse(self, *argv):
         return cli.build_parser().parse_args(list(argv))
 
-    def test_no_verb_at_all_is_the_settings_window(self):
-        # argparse leaves the dest as None; run() is what turns it into "".
+    def test_no_verb_uses_the_plain_gui_command(self):
+        # argparse leaves the dest as None; run() selects home.
         opts = self.parse()
         self.assertIsNone(opts.verb)
         self.assertEqual(opts.func, cli.cmd_plain)
@@ -162,7 +171,7 @@ class Parser(unittest.TestCase):
                                  name)
 
     def test_every_verb_is_wired_to_something(self):
-        for verb in ("record", "toggle", "start", "stop", "cancel", "ask",
+        for verb in ("record", "toggle", "start", "stop", "pause", "cancel", "ask",
                      "session", "transcribe", "meeting", "meetings", "history",
                      "config", "prompt", "devices", "models", "test-key",
                      "doctor", "shortcut", "status", "settings", "restart",
@@ -340,6 +349,57 @@ class ConfigCommands(DikteTest):
                          {"cleanup", "subtitles", "meeting", "agent"})
 
 
+class ShortcutStatus(DikteTest):
+    """Where the answer comes from, which is not one place on every system.
+
+    macOS keeps no shortcut registry: a combination is held by the running
+    process and by nothing else, so a command line that reads its own idea of
+    "installed" reports every shortcut as missing while all of them work.
+    """
+
+    def run_cmd(self, func, **values):
+        with captured() as (out, err):
+            code = func(Options(**values))
+        return code, out.getvalue(), err.getvalue()
+
+    def status(self, reply):
+        with mock.patch.object(ipc, "send", return_value=reply) as send:
+            code, out, _ = self.run_cmd(cli.cmd_shortcut, shortcut="status",
+                                        json=True)
+        return code, json.loads(out), send
+
+    def test_what_the_running_instance_holds_is_what_is_reported(self):
+        code, answer, _ = self.status({
+            "shortcuts": {"toggle": "Ctrl+Option+Space", "cancel": None,
+                          "ask": None, "meeting": None},
+            "listener": True,
+        })
+        self.assertEqual(code, 0)
+        self.assertEqual(answer["shortcuts"]["toggle"]["registered"],
+                         "Ctrl+Option+Space")
+        self.assertIsNone(answer["shortcuts"]["cancel"]["registered"])
+        self.assertIs(answer["listener"], True)
+
+    def test_the_instance_is_the_one_asked(self):
+        _, _, send = self.status({"shortcuts": {}, "listener": False})
+        send.assert_called_once_with("status")
+
+    def test_nothing_running_falls_back_to_what_this_process_can_read(self):
+        """Which on Linux is the registry, and on macOS is nothing, correctly
+        so, because there the keys really are gone with the process."""
+        code, answer, _ = self.status(None)
+        self.assertEqual(code, 0)
+        for name, spec in hotkey.SHORTCUTS.items():
+            with self.subTest(name=name):
+                self.assertEqual(answer["shortcuts"][name]["registered"],
+                                 hotkey.shortcut_status(spec.desktop_id))
+
+    def test_the_configured_combination_is_reported_either_way(self):
+        code, answer, _ = self.status(None)
+        self.assertEqual(answer["shortcuts"]["toggle"]["configured"],
+                         cfg.Config()["shortcut"])
+
+
 class Providers(DikteTest):
     """The terminal reaches every provider the settings window does."""
 
@@ -372,6 +432,78 @@ class Providers(DikteTest):
         self.assertIn("groq", out)
         self.assertIn("Groq", out)
 
+    def test_opencode_is_a_choice_and_reports_under_its_own_name(self):
+        parser = cli.build_parser()
+        self.assertEqual(
+            parser.parse_args(["test-key", "opencode"]).which, "opencode")
+        self.write_config({"opencode_api_key": "opencode-test"})
+        with fake_urlopen({"data": [{"id": "deepseek-v4-flash"}]}):
+            code, out, _ = self.run_cmd(cli.cmd_test_key, which="opencode")
+        self.assertEqual(code, 0)
+        self.assertIn("opencode: connection works, 1 models visible", out)
+
+
+class Updates(DikteTest):
+    """`dikte update` looks, says what it found, and installs nothing."""
+
+    RELEASE: ClassVar[dict] = {
+        "tag_name": "v9.9.9",
+        "html_url": "https://github.com/yusufipk/dikte/releases/tag/v9.9.9",
+    }
+
+    def setUp(self):
+        super().setUp()
+        self.patch_attr(hub, "CACHE_DIR", self.path("cache"))
+        # Nothing here may reach a browser, whatever the answer turns out to be.
+        self.opened = []
+        self.patch_attr(webbrowser, "open", self.opened.append)
+
+    def run_update(self, reply, **values):
+        with fake_urlopen(reply), captured() as (out, err):
+            code = cli.cmd_update(Options(open=False, **values))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_a_newer_release_is_named_with_its_page(self):
+        code, out, _ = self.run_update(self.RELEASE)
+        self.assertEqual(code, 0)
+        self.assertIn("9.9.9", out)
+        self.assertIn(self.RELEASE["html_url"], out)
+
+    def test_this_build_being_the_newest_is_not_a_failure(self):
+        code, out, _ = self.run_update({"tag_name": f"v{cli.__version__}"})
+        self.assertEqual(code, 0)
+        self.assertIn("newest", out)
+
+    def test_the_json_answer_says_both_numbers(self):
+        code, out, _ = self.run_update(self.RELEASE, json=True)
+        answer = json.loads(out)
+        self.assertTrue(answer["update"])
+        self.assertEqual(answer["latest"], "9.9.9")
+        self.assertEqual(answer["current"], cli.__version__)
+
+    def test_github_being_unreachable_is_a_failure_with_a_reason(self):
+        with fake_urlopen(url_error("no route to host")), captured() as (_, err):
+            code = cli.cmd_update(Options(open=False))
+        self.assertEqual(code, 1)
+        self.assertIn("api.github.com", err.getvalue())
+
+    def test_the_browser_is_opened_only_when_asked_and_only_when_there_is_one(self):
+        self.run_update(self.RELEASE)
+        self.assertEqual(self.opened, [])
+        with fake_urlopen({"tag_name": f"v{cli.__version__}"}), captured():
+            cli.cmd_update(Options(open=True))
+        self.assertEqual(self.opened, [])
+        with fake_urlopen(self.RELEASE), captured():
+            cli.cmd_update(Options(open=True))
+        self.assertEqual(self.opened, [self.RELEASE["html_url"]])
+
+    def test_the_answer_is_written_down_for_the_application(self):
+        """A check at a terminal is a check; the tray must not go and ask the
+        same question an hour later."""
+        self.run_update(self.RELEASE)
+        self.assertEqual(update.state()["version"], "9.9.9")
+        self.assertFalse(update.due())
+
 
 class Doctor(DikteTest):
     """One pass over everything the settings window checks behind its buttons."""
@@ -390,6 +522,59 @@ class Doctor(DikteTest):
         self.assertIn("OpenRouter key, cleaning up on some/model",
                       self.run_doctor(as_json=False, cleanup_model="some/model"))
 
+    def test_cleanup_on_opencode_is_a_question_about_its_own_key(self):
+        reply = self.run_doctor(cleanup_provider="opencode",
+                                cleanup_opencode_model="glm-5.3")
+        self.assertEqual(reply["cleanup"]["provider"], "opencode")
+        self.assertEqual(reply["cleanup"]["model"], "glm-5.3")
+        self.assertIn("OpenCode Go key, cleaning up on glm-5.3",
+                      self.run_doctor(as_json=False, cleanup_provider="opencode",
+                                      cleanup_opencode_model="glm-5.3"))
+
+    def test_it_survives_every_provider_cleanup_can_be_set_to(self):
+        """It used to raise KeyError on the local model, whose executable is ""."""
+        for name in cleanup.PROVIDERS:
+            with self.subTest(provider=name):
+                reply = self.run_doctor(cleanup_provider=name)
+                self.assertEqual(reply["cleanup"]["provider"], name)
+                self.run_doctor(as_json=False, cleanup_provider=name)
+
+    def test_a_provider_with_no_key_to_check_says_so_rather_than_no(self):
+        """A CLI needs none, so `false` there would read as one gone missing."""
+        self.assertIsNone(self.run_doctor(cleanup_provider="claude")["cleanup"]["key"])
+        self.assertIsNone(self.run_doctor(cleanup_provider="local")["cleanup"]["key"])
+        self.assertIs(self.run_doctor(cleanup_provider="gemini")["cleanup"]["key"],
+                      False)
+
+    def test_cleanup_on_google_is_a_question_about_its_own_key(self):
+        line = self.run_doctor(as_json=False, cleanup_provider="gemini",
+                               cleanup_gemini_model="gemini-2.5-flash")
+        self.assertIn("Google AI Studio key, cleaning up on gemini-2.5-flash", line)
+
+    def test_it_asks_after_the_programs_this_desktop_actually_uses(self):
+        """A missing ydotool on a Mac is a red mark with nothing behind it."""
+        with mock.patch.object(cli.paste, "desktop", return_value=paste.MACOS):
+            mac = self.run_doctor()["programs"]
+        with mock.patch.object(cli.paste, "desktop", return_value=paste.WAYLAND):
+            wayland = self.run_doctor()["programs"]
+        self.assertIn("pbcopy", mac)
+        self.assertNotIn("ydotool", mac)
+        self.assertIn("ydotool", wayland)
+        self.assertIn("ffmpeg", mac)   # the one every system records through
+
+    def test_a_system_that_shells_out_for_neither_half_is_asked_for_neither(self):
+        # shutil.which is faked as well as the platform: the real one reads
+        # sys.platform too, and reaches for a Windows API this machine has not
+        # got the moment it is told it is on Windows.
+        with mock.patch.object(cli.paste, "desktop", return_value=paste.WINDOWS), \
+                only_these_tools("ffmpeg"), \
+                mock.patch.object(cli.sys, "platform", "win32"):
+            programs = self.run_doctor()["programs"]
+        self.assertNotIn("", programs)
+        self.assertEqual([name for name in ("wl-copy", "ydotool", "pactl",
+                                            "pw-record", "kwriteconfig6")
+                          if name in programs], [])
+
     def test_cleanup_on_a_cli_is_a_question_about_the_program(self):
         reply = self.run_doctor(cleanup_provider="codex",
                                 cleanup_codex_model="gpt-5.4")
@@ -399,6 +584,40 @@ class Doctor(DikteTest):
         self.assertIn("codex, cleaning up on gpt-5.4",
                       self.run_doctor(as_json=False, cleanup_provider="codex",
                                       cleanup_codex_model="gpt-5.4"))
+
+    def test_agent_on_hosted_provider_does_not_ask_for_a_cli_program(self):
+        for provider in ("openrouter", "opencode"):
+            with self.subTest(provider=provider):
+                reply = self.run_doctor(assistant_provider=provider)
+                self.assertEqual(reply["agent"]["provider"], provider)
+                for cli_name in ("claude", "codex", "agy"):
+                    self.assertNotIn(cli_name, reply["programs"])
+
+    def test_agent_on_a_cli_asks_for_the_program(self):
+        for provider, binary in (("claude", "claude"), ("codex", "codex"), ("agy", "agy")):
+            with self.subTest(provider=provider):
+                reply = self.run_doctor(assistant_provider=provider)
+                self.assertEqual(reply["agent"]["provider"], provider)
+                self.assertIn(binary, reply["programs"])
+
+
+class Devices(DikteTest):
+    def test_a_machine_with_nothing_names_its_own_missing_program(self):
+        """The Windows README sends people here, and pactl is not on it."""
+        for here, expected in ((audio.DSHOW, "ffmpeg"),
+                               (audio.PULSE, "pulseaudio-utils")):
+            with self.subTest(sound=expected):
+                with mock.patch.object(cli.audio, "sound", return_value=here), \
+                        mock.patch.object(cli.audio, "list_sources",
+                                          return_value=[]), \
+                        mock.patch.object(cli.audio, "list_monitors",
+                                          return_value=[]), \
+                        mock.patch.object(cli.audio, "default_monitor",
+                                          return_value=""), \
+                        captured() as (out, _err):
+                    code = cli.cmd_devices(Options(json=True))
+                self.assertEqual(code, 1)
+                self.assertIn(expected, json.loads(out.getvalue())["error"])
 
 
 class Finding(DikteTest):
@@ -472,7 +691,11 @@ class WithoutAnInstance(DikteTest):
     def run_verb(self, argv):
         # launch_gui replaces this process with the application, so it never
         # comes back in real use and must not be allowed to here.
+        # `ask` with no text reads what was piped in, and the runner's own
+        # stdin is not that: under pytest it is an object that refuses to be
+        # read at all.
         with mock.patch.object(ipc, "send", return_value=None), \
+                mock.patch.object(sys, "stdin", io.StringIO()), \
                 mock.patch.object(cli, "launch_gui") as launch, \
                 captured() as (out, err):
             code = cli.run(argv)
@@ -484,9 +707,13 @@ class WithoutAnInstance(DikteTest):
         launch.assert_called_once_with("toggle")
 
     def test_every_verb_that_opens_a_window_can_start_it(self):
-        for verb in ("settings", "toggle", "ask", "meeting"):
+        for verb in ("home", "settings", "toggle", "ask", "meeting"):
             with self.subTest(verb=verb):
                 self.assertTrue(self.run_verb([verb])[3].called)
+
+    def test_bare_command_opens_the_daily_workspace(self):
+        _, _, _, launch = self.run_verb([])
+        launch.assert_called_once_with("home")
 
     def test_a_verb_asked_to_wait_starts_nothing(self):
         """There would be no run to wait for; the process would just be replaced."""
@@ -545,6 +772,13 @@ class Replies(DikteTest):
         self.assertEqual(code, 0)
         self.assertEqual(out.strip(), "Book it for Thursday.")
 
+    def test_the_json_answer_carries_the_detected_language(self):
+        code, out, _ = self.run_verb(
+            ["--json", "record"],
+            {"ok": True, "text": "Selam", "speech_language": "tr"})
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["speech_language"], "tr")
+
     def test_a_dictation_that_failed(self):
         code, out, err = self.run_verb(["stop", "--wait"],
                                        {"ok": False, "error": "No speech detected"})
@@ -569,6 +803,175 @@ class Replies(DikteTest):
         with mock.patch.object(ipc, "send", return_value={"ok": True, "legacy": True}), \
                 captured():
             self.assertEqual(cli.run(["cancel"]), 0)
+
+    def test_pausing_a_recording_nobody_started_is_not_a_failure_either(self):
+        """A key that pauses can be pressed when there is nothing to pause, and
+        it must not start an application to tell you so."""
+        with mock.patch.object(ipc, "send", return_value=None), \
+                mock.patch.object(cli, "launch_gui") as launched, captured():
+            self.assertEqual(cli.run(["pause"]), 0)
+        self.assertFalse(launched.called)
+
+
+class LocalModels(DikteTest):
+    """Whether the model on this machine is loaded, and what it is loaded on."""
+
+    def status(self, local, **rest):
+        reply = {"ok": True, "running": True, "dictation": "idle", "ask": "idle",
+                 "meeting": "idle", "listener": True, "local": local, **rest}
+        with mock.patch.object(ipc, "send", return_value=reply), \
+                captured() as (out, _err):
+            cli.cmd_status(Options(json=False))
+        return out.getvalue()
+
+    def entry(self, **values):
+        base = {"running": True, "used": True, "pid": 7, "port": 4321,
+                "model": "ggml-small.bin", "gpu_wanted": True,
+                "backend": "CUDA", "device": "RTX 4070", "layers": "",
+                "available": ["CUDA", "CPU"]}
+        base.update(values)
+        return base
+
+    def test_a_loaded_model_says_what_it_is_loaded_on(self):
+        line = self.status({"whisper": self.entry()})
+        self.assertIn("whisper:", line)
+        self.assertIn("loaded on the graphics card (CUDA, RTX 4070)", line)
+        self.assertIn("ggml-small.bin", line)
+
+    def test_a_card_asked_for_and_not_found_is_said_out_loud(self):
+        line = self.status({"whisper": self.entry(
+            backend="CPU", device="CPU", available=["CPU"])})
+        self.assertIn("loaded on the processor", line)
+        self.assertIn("only the CPU backend was loaded", line)
+
+    def test_a_download_is_not_assumed_to_lack_gpu_support(self):
+        line = self.status({"whisper": self.entry(
+            backend="CPU", device="CPU", available=["CPU"], downloaded=True)})
+        self.assertIn("only the CPU backend was loaded", line)
+        self.assertIn("driver errors", line)
+        self.assertNotIn("has no GPU backend", line)
+
+    def test_a_card_the_build_could_have_used_says_something_else(self):
+        line = self.status({"whisper": self.entry(
+            backend="CPU", device="CPU", available=["CUDA", "CPU"])})
+        self.assertIn("could not be used", line)
+        self.assertNotIn("carries none", line)
+
+    def test_a_card_nobody_asked_for_is_not_a_complaint(self):
+        line = self.status({"whisper": self.entry(
+            backend="CPU", device="CPU", gpu_wanted=False, available=["CPU"])})
+        self.assertIn("loaded on the processor", line)
+        self.assertNotIn("switched on", line)
+
+    def test_a_model_that_is_wanted_and_not_loaded_says_so(self):
+        line = self.status({"whisper": self.entry(running=False)})
+        self.assertIn("whisper:", line)
+        self.assertIn("not loaded", line)
+
+    def test_a_model_neither_used_nor_loaded_is_not_worth_a_line(self):
+        line = self.status({"llama": self.entry(running=False, used=False)})
+        self.assertNotIn("llama", line)
+
+    def test_an_instance_too_old_to_have_been_asked_says_nothing(self):
+        reply = {"ok": True, "running": True, "dictation": "idle", "ask": "idle",
+                 "meeting": "idle", "listener": True}
+        with mock.patch.object(ipc, "send", return_value=reply), \
+                captured() as (out, _err):
+            cli.cmd_status(Options(json=False))
+        self.assertNotIn("whisper", out.getvalue())
+
+    # ---- doctor, which can be asked with nothing running -----------------
+
+    def doctor(self, as_json=False, **settings):
+        self.write_config(settings)
+        with mock.patch.object(ipc, "send", return_value=None), \
+                captured() as (out, _err):
+            cli.cmd_doctor(Options(json=as_json))
+        return json.loads(out.getvalue()) if as_json else out.getvalue()
+
+    def log(self, text):
+        path = ggml.DATA_DIR / "whisper-server.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    def test_with_nothing_running_the_last_start_is_read_off_its_log(self):
+        self.log("load_backend: loaded CPU backend from /x.so\n"
+                 "whisper_backend_init_gpu: device 0: CPU (type: 0)\n"
+                 "whisper_backend_init_gpu: no GPU found\n")
+        line = self.doctor(transcribe_provider="local", local_gpu=True)
+        self.assertIn("last run on the processor", line)
+        self.assertNotIn("this build carries none", line)
+        self.assertNotIn("check the server log", line)
+
+    def test_old_cpu_log_does_not_diagnose_a_new_system_binary(self):
+        self.log("load_backend: loaded CPU backend from /old-download.so\n"
+                 "whisper_backend_init_gpu: no GPU found\n")
+        with mock.patch.object(ggml, "program_path",
+                               return_value="/usr/bin/whisper-server"):
+            line = self.doctor(transcribe_provider="local", local_gpu=True)
+            data = self.doctor(as_json=True, transcribe_provider="local",
+                               local_gpu=True)
+        self.assertIn("last run on the processor", line)
+        self.assertNotIn("carries none", line)
+        self.assertNotIn("gpu_wanted", data["local"]["whisper"])
+        self.assertNotIn("downloaded", data["local"]["whisper"])
+
+    def test_enabling_gpu_does_not_reinterpret_a_past_cpu_run(self):
+        self.log("load_backend: loaded Vulkan backend from /gpu.so\n"
+                 "load_backend: loaded CPU backend from /cpu.so\n"
+                 "whisper_init_with_params_no_state: use gpu = 0\n"
+                 "whisper_backend_init_gpu: no GPU found\n")
+        line = self.doctor(transcribe_provider="local", local_gpu=True)
+        self.assertIn("last run on the processor", line)
+        self.assertNotIn("none was found", line)
+        self.assertNotIn("could not be used", line)
+
+    def test_a_run_that_named_no_backend_is_not_read_as_no_run_at_all(self):
+        # A log with nothing recognisable in it still says a server started
+        # here once, which is a different thing from never having started.
+        self.log("whisper_model_load: model size    =  147.37 MB\n")
+        line = self.doctor(transcribe_provider="local")
+        self.assertIn("said nothing about what it was running on", line)
+        self.assertNotIn("never run here", line)
+
+    def test_a_machine_that_never_ran_one_is_not_made_up_a_history_for(self):
+        line = self.doctor(transcribe_provider="local")
+        self.assertIn("never run here", line)
+
+    def test_a_setup_that_transcribes_in_the_cloud_reads_about_none_of_it(self):
+        line = self.doctor(transcribe_provider="openai", cleanup_enabled=False)
+        self.assertNotIn("whisper ", line)
+        self.assertNotIn("never run here", line)
+
+    def test_an_instance_that_cannot_be_asked_is_not_read_as_a_no(self):
+        """It used to print "not loaded", which is a different claim."""
+        self.write_config({"transcribe_provider": "local"})
+        with mock.patch.object(ipc, "send", return_value={"ok": True}), \
+                captured() as (out, _err):
+            cli.cmd_doctor(Options(json=False))
+        self.assertIn("too old to say", out.getvalue())
+
+
+class TranscribeRunsHere(DikteTest):
+    """`dikte transcribe` runs in this process, not in the instance."""
+
+    def test_the_local_servers_are_handed_the_settings_first(self):
+        # The GUI does this at startup; a CLI run has no GUI to have done it,
+        # and without it the whisper server holds an empty model name.
+        wav = self.path("clip.wav")
+        wav.write_bytes(b"RIFF not really audio")
+        self.write_config({"local_model": "ggml-base.bin"})
+        self.addCleanup(ggml.whisper.configure,
+                        model="", threads=0, gpu=True, binary="")
+
+        opts = cli.build_parser().parse_args(["transcribe", str(wav)])
+        with mock.patch.object(cli.filetranscribe, "FileTranscriber"), \
+                mock.patch.object(cli, "_headless",
+                                  return_value={"error": "stopped"}), \
+                captured():
+            cli.cmd_transcribe(opts)
+
+        self.assertEqual(ggml.whisper.settings()["model"], "ggml-base.bin")
 
 
 if __name__ == "__main__":

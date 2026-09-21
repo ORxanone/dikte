@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  test:
+  linux:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -24,10 +24,18 @@ jobs:
       # for the offscreen platform the tests run on. QtNetwork wants the Kerberos
       # library, and the widgets want fontconfig, whether or not anything is
       # ever drawn.
+      #
+      # A mirror that stops answering is what the retries and the timeout are
+      # for: apt waits on it by default, and a job waiting on apt sits there
+      # until the six hour limit rather than going red in a minute. The same
+      # two lines are in build.yml and release.yml, which install the same
+      # eight libraries.
       - name: Install the Qt runtime libraries
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y \
+          apt="-o Acquire::Retries=3 -o Acquire::http::Timeout=20"
+          sudo apt-get $apt update
+          sudo apt-get $apt install --no-install-recommends -y \
             libegl1 libgl1 libxkbcommon0 libdbus-1-3 libglib2.0-0 \
             libfontconfig1 libfreetype6 libgssapi-krb5-2
 
@@ -38,3 +46,85 @@ jobs:
       # tests reach neither the network nor a sound device.
       - name: Run the tests
         run: python -m unittest discover --verbose
+
+  # The macOS backends are written to be checked from either side, so most of
+  # what runs here also runs above. What only this job can catch is the half
+  # that reads the real platform: the Carbon and CoreGraphics libraries have to
+  # be there to be opened, the paths under ~/Library have to be the ones macOS
+  # actually uses, and the Linux tests are skipped rather than failed.
+  macos:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # No apt step: PyQt6's wheel carries the frameworks it needs on a Mac.
+      - name: Install PyQt6
+        run: python -m pip install --quiet PyQt6
+
+      - name: Run the tests
+        run: python -m unittest discover --verbose
+
+      # The installer is most of what is new on a Mac, and a syntax error in it
+      # would otherwise only turn up on somebody's machine. Running it is not on
+      # the table here: it wants a microphone, a login session and a keychain.
+      - name: Check the installer parses
+        run: |
+          bash -n install.sh
+          bash -n scripts/install-mac.sh
+          bash -n scripts/update.sh
+          bash -n scripts/uninstall.sh
+          bash -n scripts/release.sh
+          bash -n packaging/build-appimage.sh
+          bash -n packaging/build-dmg.sh
+
+  # The same job again for the same reason. The Windows backends are faked at
+  # the one function that loads user32 and kernel32, so every line of them is
+  # already read on the Linux above; what only this job can catch is the half
+  # that reads the real system. %APPDATA% and %LOCALAPPDATA% have to be the
+  # directories Windows actually hands out, a path spelled with a backslash has
+  # to be one the tests can still read, and the config-permission test has to
+  # skip rather than fail on a file system that decides by ACL.
+  windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # No apt step: PyQt6's wheel carries the Qt DLLs it needs on Windows.
+      - name: Install PyQt6
+        run: python -m pip install --quiet PyQt6
+
+      - name: Run the tests
+        run: python -m unittest discover --verbose
+
+      # What the Mac does for its installer, in the language this one is in.
+      # Parsing only: install.ps1 writes into the Start Menu and the user PATH,
+      # and build-windows.ps1 downloads an ffmpeg and runs PyInstaller. The
+      # setup program itself is compiled by build.yml, on the pull requests
+      # that touch it.
+      - name: Check the installer and the build script parse
+        shell: pwsh
+        run: |
+          foreach ($script in "install.ps1", "packaging/build-windows.ps1") {
+            $problems = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              "$PWD/$script", [ref]$null, [ref]$problems) > $null
+            if ($problems) { $problems; exit 1 }
+          }

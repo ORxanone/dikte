@@ -1,0 +1,9 @@
+FROM ubuntu@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc
+ARG DEBIAN_FRONTEND=noninteractive
+# The loader and nothing behind it: the machine that has libvulkan because
+# something else pulled it in, and no driver to go with it.
+RUN apt-get update \
+ && apt-get install --no-install-recommends -y \
+      ca-certificates curl libstdc++6 libvulkan1 \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /bundle

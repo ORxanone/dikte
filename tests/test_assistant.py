@@ -10,21 +10,28 @@ import io
 import json
 import os
 import subprocess
+import sys
+import threading
 import time
 import unittest
 from unittest import mock
 
-import assistant
-from tests.support import DikteTest, fake_urlopen, only_these_tools
+from dikte import assistant
+from tests.support import (DikteTest, FakeCompleted, fake_urlopen,
+                           only_these_tools)
 
 
 class FakeCli:
-    """A CLI that prints the given events and exits."""
+    """A CLI that prints the given events and exits.
 
-    def __init__(self, events=(), code=0, stderr="", noise=()):
+    Its stderr is not modelled: _stream hands the process a temporary file for
+    that, and a mocked Popen leaves the file empty, which is what a quiet CLI
+    writes anyway.
+    """
+
+    def __init__(self, events=(), code=0, noise=()):
         lines = list(noise) + [json.dumps(event) for event in events]
         self.stdout = io.StringIO("\n".join(lines) + "\n")
-        self.stderr = io.StringIO(stderr)
         self.returncode = code
         self.killed = False
 
@@ -39,6 +46,38 @@ class FakeCli:
 
     def kill(self):
         self.killed = True
+
+
+class WedgedCli:
+    """A CLI whose stdout produces nothing, the way a hung process's does.
+
+    Iterating its stdout blocks until the kill arrives, because that is what
+    reading a silent pipe does: only the process ending closes the stream.
+    """
+
+    def __init__(self):
+        self.pid = 4242
+        self.returncode = None
+        self.released = threading.Event()
+        self.stdout = self
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        # The 5 second cap is a safety net for the test itself; the kill is
+        # what is supposed to end the wait.
+        self.released.wait(timeout=5)
+        raise StopIteration
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def close(self):
+        pass
 
 
 class Provider(DikteTest):
@@ -58,15 +97,38 @@ class Provider(DikteTest):
     def test_what_each_one_runs(self):
         self.assertEqual(assistant.executable("claude"), "claude")
         self.assertEqual(assistant.executable("codex"), "codex")
+        self.assertEqual(assistant.executable("agy"), "agy")
         self.assertEqual(assistant.executable("openrouter"), "")
+        self.assertEqual(assistant.executable("opencode"), "")
+
+    def test_the_model_recorded_is_the_one_that_answered(self):
+        """The history used to write Claude's setting whoever had answered."""
+        self.assertEqual(assistant.model(self.config()), "sonnet")
+        self.assertEqual(
+            assistant.model(self.config(assistant_provider="codex")), "codex")
+        self.assertEqual(
+            assistant.model(self.config(assistant_provider="agy")), "agy")
+        self.assertEqual(
+            assistant.model(self.config(assistant_provider="agy",
+                                        assistant_agy_model="gemini-3.1-pro-low")),
+            "gemini-3.1-pro-low")
+        self.assertEqual(
+            assistant.model(self.config(assistant_provider="openrouter")),
+            "google/gemini-3.5-flash")
 
     def test_what_each_one_is_called(self):
         self.assertEqual(assistant.display_name(self.config()), "Claude")
-        self.assertEqual(
-            assistant.display_name(self.config(assistant_provider="codex")), "Codex")
-        self.assertEqual(
-            assistant.display_name(self.config(assistant_provider="openrouter")),
-            "OpenRouter")
+        for name, called in (("codex", "Codex"), ("agy", "Antigravity"),
+                             ("openrouter", "OpenRouter"),
+                             ("opencode", "OpenCode Go")):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    assistant.display_name(self.config(assistant_provider=name)),
+                    called)
+
+    def test_every_provider_has_a_name_to_be_called_by(self):
+        """_conclude writes its errors in it, so a gap here is a bare id."""
+        self.assertEqual(set(assistant.SERVICES), set(assistant.PROVIDERS))
 
 
 class Effort(unittest.TestCase):
@@ -74,21 +136,26 @@ class Effort(unittest.TestCase):
 
     def test_the_scales_cover_the_same_settings(self):
         self.assertEqual(set(assistant.CLAUDE_EFFORT), set(assistant.CODEX_EFFORT))
+        self.assertEqual(set(assistant.CLAUDE_EFFORT), set(assistant.AGY_EFFORT))
 
-    def test_codex_has_no_rung_above_high(self):
-        self.assertEqual(assistant.CODEX_EFFORT["xhigh"], "high")
-        self.assertEqual(assistant.CODEX_EFFORT["max"], "high")
+    def test_neither_codex_nor_agy_has_a_rung_above_high(self):
+        for scale in (assistant.CODEX_EFFORT, assistant.AGY_EFFORT):
+            self.assertEqual(scale["xhigh"], "high")
+            self.assertEqual(scale["max"], "high")
 
-    def test_neither_one_asks_for_a_rung_below_low(self):
+    def test_none_of_them_asks_for_a_rung_below_low(self):
         # Claude has none; Codex has one, but calls it "minimal" on the older
-        # models and "none" on the newer ones, and refuses the wrong word.
-        for scale in (assistant.CLAUDE_EFFORT, assistant.CODEX_EFFORT):
+        # models and "none" on the newer ones, and refuses the wrong word; agy
+        # has three rungs and no word for off at all.
+        for scale in (assistant.CLAUDE_EFFORT, assistant.CODEX_EFFORT,
+                      assistant.AGY_EFFORT):
             self.assertEqual(scale["none"], "low")
             self.assertEqual(scale["minimal"], "low")
 
     def test_an_empty_setting_asks_for_nothing(self):
-        self.assertEqual(assistant.CLAUDE_EFFORT.get("", ""), "")
-        self.assertEqual(assistant.CODEX_EFFORT.get("", ""), "")
+        for scale in (assistant.CLAUDE_EFFORT, assistant.CODEX_EFFORT,
+                      assistant.AGY_EFFORT):
+            self.assertEqual(scale.get("", ""), "")
 
 
 class Session(DikteTest):
@@ -221,19 +288,7 @@ class Denials(DikteTest):
         self.assertIn("Write", warning)
 
 
-class SessionMissing(unittest.TestCase):
-    def test_a_session_that_is_gone(self):
-        for text in ("Error: session abc not found",
-                     "No conversation with that id",
-                     "unknown thread: abc"):
-            with self.subTest(text=text):
-                self.assertTrue(assistant._session_missing(text))
-
-    def test_an_unrelated_failure(self):
-        for text in ("", "network unreachable", "session limit exceeded"):
-            with self.subTest(text=text):
-                self.assertFalse(assistant._session_missing(text))
-
+class LastLine(unittest.TestCase):
     def test_the_last_line_is_the_one_worth_showing(self):
         self.assertEqual(assistant.last_line("warning\n\nreal error\n"),
                          "real error")
@@ -249,56 +304,129 @@ class Conclude(DikteTest):
 
     def test_an_answer_and_its_session(self):
         answer, warning = assistant._conclude(
-            self.found(answer="done", session="abc"), 0, "", "", "Claude")
+            self.found(answer="done", session="abc"), 0, "", "", "claude")
         self.assertEqual(answer, "done")
         self.assertEqual(warning, "")
         self.assertEqual(assistant.read_session("claude", 1800), "abc")
 
-    def test_codex_stores_under_its_own_name(self):
-        assistant._conclude(self.found(answer="done", session="t-1"), 0, "",
-                            "", "Codex")
-        self.assertEqual(assistant.read_session("codex", 1800), "t-1")
+    def test_each_one_stores_under_its_own_name(self):
+        for name, session in (("codex", "t-1"), ("agy", "c-9")):
+            with self.subTest(name=name):
+                assistant._conclude(self.found(answer="done", session=session),
+                                    0, "", "", name)
+                self.assertEqual(assistant.read_session(name, 1800), session)
+
+    def test_the_error_is_written_in_the_provider_s_own_name(self):
+        with self.assertRaises(assistant.AssistantError) as caught:
+            assistant._conclude(self.found(), 1, "", "", "agy")
+        self.assertIn("Antigravity", str(caught.exception))
 
     def test_a_non_zero_exit_with_nothing_to_show_for_it(self):
         with self.assertRaises(assistant.AssistantError) as caught:
-            assistant._conclude(self.found(), 1, "it all went wrong\n", "", "Claude")
+            assistant._conclude(self.found(), 1, "it all went wrong\n", "", "claude")
         self.assertIn("it all went wrong", str(caught.exception))
 
     def test_a_session_that_is_gone_is_raised_apart(self):
         with self.assertRaises(assistant._SessionGone):
             assistant._conclude(self.found(), 1, "session abc not found",
-                                "abc", "Claude")
+                                "abc", "claude")
+
+    def test_the_recovery_no_longer_hangs_on_the_words_the_cli_chose(self):
+        # The complaint used to be matched by substring, which a CLI update or
+        # another language broke. A resumed run that died with nothing to show
+        # is now enough on its own.
+        for stderr in ("Oturum bulunamadı", "something else entirely", ""):
+            with self.subTest(stderr=stderr):
+                with self.assertRaises(assistant._SessionGone):
+                    assistant._conclude(self.found(), 1, stderr, "abc", "Claude")
+
+    def test_api_trouble_on_a_resumed_run_is_not_blamed_on_the_session(self):
+        # A fresh session cannot cure a spent quota, a signed-out CLI or a dead
+        # network: the retry would fail the same way after a second wait, and
+        # the user would lose the conversation thread on top.
+        for stderr in ("Rate limit exceeded",
+                       "You are not logged in. Please run /login.",
+                       "API Error: 401 Unauthorized",
+                       "fetch failed: ECONNREFUSED 127.0.0.1"):
+            with self.subTest(stderr=stderr):
+                with self.assertRaises(assistant.AssistantError) as caught:
+                    assistant._conclude(self.found(), 1, stderr, "abc", "Claude")
+                self.assertIn(stderr, str(caught.exception))
 
     def test_a_session_that_is_gone_only_matters_when_one_was_resumed(self):
         with self.assertRaises(assistant.AssistantError):
             assistant._conclude(self.found(), 1, "session abc not found",
-                                "", "Claude")
+                                "", "claude")
 
     def test_an_answer_survives_a_non_zero_exit(self):
         answer, _ = assistant._conclude(self.found(answer="done"), 1, "noise",
-                                        "", "Claude")
+                                        "", "claude")
+        self.assertEqual(answer, "done")
+
+    def test_an_answer_on_a_resumed_session_is_kept_rather_than_retried(self):
+        answer, _ = assistant._conclude(self.found(answer="done"), 1, "noise",
+                                        "abc", "Claude")
         self.assertEqual(answer, "done")
 
     def test_a_reported_failure_with_no_answer(self):
         with self.assertRaises(assistant.AssistantError) as caught:
             assistant._conclude(self.found(failure="the model refused"), 0, "",
-                                "", "Claude")
+                                "", "claude")
         self.assertIn("refused", str(caught.exception))
 
     def test_a_run_that_said_nothing_at_all(self):
         with self.assertRaises(assistant.AssistantError) as caught:
-            assistant._conclude(self.found(), 0, "", "", "Codex")
+            assistant._conclude(self.found(), 0, "", "", "codex")
         self.assertIn("Codex", str(caught.exception))
 
 
+class Stream(DikteTest):
+    def test_a_cli_that_floods_stderr_still_finishes(self):
+        # A real subprocess, because the wedge being tested is real plumbing:
+        # with stderr on a pipe nobody drains, 200 KB fills the pipe's buffer,
+        # the child blocks writing it, and the run hangs until the watchdog
+        # timeout. With stderr on a file the run completes at once.
+        script = (
+            "import sys\n"
+            "sys.stderr.write('x' * 200000)\n"
+            "sys.stderr.flush()\n"
+            "print('{\"type\": \"result\", \"result\": \"done\"}')\n"
+        )
+        conf = self.config(assistant_timeout=15)
+        events = []
+        code, stderr = assistant._stream(
+            [sys.executable, "-c", script], conf, events.append, None)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(stderr), 200000)
+        self.assertEqual(events[-1]["result"], "done")
+
+    def test_the_watchdog_takes_the_whole_tree_down_on_timeout(self):
+        proc = WedgedCli()
+
+        def killed(target):
+            # What the real kill does, as far as _stream can see: the process
+            # ends, and its closing stream releases the blocked read.
+            target.returncode = 1
+            target.released.set()
+
+        conf = self.config(assistant_timeout=0)
+        with mock.patch.object(subprocess, "Popen", return_value=proc), \
+                mock.patch.object(assistant, "kill_tree",
+                                  side_effect=killed) as kill:
+            with self.assertRaises(assistant.AssistantError) as caught:
+                assistant._stream(["claude"], conf, lambda event: None, None)
+        kill.assert_called_once_with(proc)
+        self.assertIn("did not finish", str(caught.exception))
+
+
 class AskClaude(DikteTest):
-    def run_ask(self, conf=None, events=None, code=0, stderr="", noise=(),
+    def run_ask(self, conf=None, events=None, code=0, noise=(),
                 session=""):
         conf = conf or self.config()
         proc = FakeCli(events or [
             {"type": "system", "subtype": "init", "session_id": "abc"},
             {"type": "result", "session_id": "abc", "result": "  done  "},
-        ], code=code, stderr=stderr, noise=noise)
+        ], code=code, noise=noise)
         stages = []
         with only_these_tools("claude", "codex"), \
                 mock.patch.object(subprocess, "Popen", return_value=proc) as popen:
@@ -472,6 +600,109 @@ class AskCodex(DikteTest):
         self.assertIn("quota", str(caught.exception))
 
 
+class AskAgy(DikteTest):
+    """agy's stream is shaped nothing like the other two: the key is `event`,
+    the answer arrives whole in `result.response`, and the conversation to
+    resume is named in the first line rather than the last."""
+
+    def run_ask(self, conf=None, events=None, session=""):
+        conf = conf or self.config(assistant_provider="agy")
+        proc = FakeCli(events or [
+            {"event": "init", "conversation_id": "c-9", "init": {"cwd": "/home"}},
+            {"event": "result",
+             "result": {"conversation_id": "c-9", "status": "SUCCESS",
+                        "response": "  done  "}},
+        ])
+        stages = []
+        with only_these_tools("agy"), \
+                mock.patch.object(subprocess, "Popen", return_value=proc) as popen:
+            result = assistant._ask_agy("book it", conf, session,
+                                        stages.append, None)
+        return result, popen.call_args.args[0], stages
+
+    def test_the_answer_comes_back_stripped(self):
+        (answer, warning), _, _ = self.run_ask()
+        self.assertEqual(answer, "done")
+        self.assertEqual(warning, "")
+
+    def test_the_instruction_is_kept_apart_from_the_command(self):
+        """agy takes no system prompt, so the two must not read as one."""
+        conf = self.config(assistant_provider="agy")
+        _, cmd, _ = self.run_ask(conf)
+        body = cmd[cmd.index("-p") + 1]
+        self.assertTrue(body.startswith(conf.assistant_prompt()))
+        self.assertIn("\n\n---\n\n", body)
+        self.assertTrue(body.endswith("book it"))
+
+    def test_a_first_command_starts_a_project_of_its_own(self):
+        """Without it agy works in whichever project it was last in."""
+        _, cmd, _ = self.run_ask()
+        self.assertIn("--new-project", cmd)
+        self.assertNotIn("--conversation", cmd)
+
+    def test_a_second_command_carries_the_conversation_rather_than_starting_one(self):
+        _, cmd, _ = self.run_ask(session="c-9")
+        self.assertEqual(cmd[cmd.index("--conversation") + 1], "c-9")
+        self.assertNotIn("--new-project", cmd)
+
+    def test_the_conversation_is_kept_under_agy_s_own_name(self):
+        self.run_ask()
+        self.assertEqual(assistant.read_session("agy", 1800), "c-9")
+
+    def test_it_is_not_left_to_give_up_before_the_caller_does(self):
+        conf = self.config(assistant_provider="agy", assistant_timeout=90)
+        _, cmd, _ = self.run_ask(conf)
+        self.assertEqual(cmd[cmd.index("--print-timeout") + 1], "90s")
+
+    def test_no_model_named_means_whatever_agy_is_set_to(self):
+        _, cmd, _ = self.run_ask()
+        self.assertNotIn("--model", cmd)
+
+    def test_a_model_of_your_own(self):
+        _, cmd, _ = self.run_ask(
+            self.config(assistant_provider="agy",
+                        assistant_agy_model="gemini-3.1-pro-low"))
+        self.assertEqual(cmd[cmd.index("--model") + 1], "gemini-3.1-pro-low")
+
+    def test_a_tool_is_named_in_the_corner_as_it_starts(self):
+        _, _, stages = self.run_ask(events=[
+            {"event": "step_update",
+             "step_update": {"step_type": "tool", "state": "ACTIVE",
+                             "tool_name": "run_command"}},
+            {"event": "step_update",
+             "step_update": {"step_type": "tool", "state": "DONE",
+                             "tool_name": "run_command"}},
+            {"event": "result",
+             "result": {"status": "SUCCESS", "response": "done"}},
+        ])
+        self.assertEqual(stages, ["Running a command…"])
+
+    def test_the_two_dozen_browser_tools_are_one_line_between_them(self):
+        _, _, stages = self.run_ask(events=[
+            {"event": "step_update",
+             "step_update": {"step_type": "tool", "state": "ACTIVE",
+                             "tool_name": "browser_click_element"}},
+            {"event": "result",
+             "result": {"status": "SUCCESS", "response": "done"}},
+        ])
+        self.assertEqual(stages, ["Working in the browser…"])
+
+    def test_a_turn_that_did_not_succeed_is_a_failure_rather_than_an_answer(self):
+        with self.assertRaises(assistant.AssistantError) as caught:
+            self.run_ask(events=[
+                {"event": "result",
+                 "result": {"status": "ERROR", "response": "the model refused"}},
+            ])
+        self.assertIn("refused", str(caught.exception))
+
+    def test_a_failure_with_nothing_to_say_is_still_named(self):
+        with self.assertRaises(assistant.AssistantError) as caught:
+            self.run_ask(events=[
+                {"event": "result", "result": {"status": "ERROR"}},
+            ])
+        self.assertIn("Antigravity", str(caught.exception))
+
+
 class AskOpenRouter(DikteTest):
     def test_a_question_and_an_answer(self):
         conf = self.config(assistant_provider="openrouter",
@@ -507,6 +738,41 @@ class AskOpenRouter(DikteTest):
             assistant.ask("when is it", conf)
 
 
+class AskOpenCode(DikteTest):
+    def test_a_question_and_an_answer(self):
+        conf = self.config(assistant_provider="opencode",
+                           opencode_api_key="opencode-test-key")
+        with fake_urlopen({"choices": [{"message": {"content": "on Thursday"}}]}):
+            answer, warning = assistant.ask("when is it", conf)
+        self.assertEqual(answer, "on Thursday")
+        self.assertEqual(warning, "")
+
+    def test_the_conversation_is_ours_to_keep(self):
+        conf = self.config(assistant_provider="opencode",
+                           opencode_api_key="opencode-test-key")
+        with fake_urlopen({"choices": [{"message": {"content": "on Thursday"}}]}):
+            assistant.ask("when is it", conf)
+        stored = assistant.read_messages("opencode", 1800)
+        self.assertEqual([row["content"] for row in stored],
+                         ["when is it", "on Thursday"])
+
+    def test_the_model_and_endpoint_are_opencode_s_own(self):
+        conf = self.config(assistant_provider="opencode",
+                           opencode_api_key="opencode-test-key",
+                           assistant_opencode_model="glm-5.3")
+        with fake_urlopen({"choices": [{"message": {"content": "on Thursday"}}]}) as calls:
+            assistant.ask("when is it", conf)
+        sent = json.loads(calls[0].data.decode("utf-8"))
+        self.assertEqual(sent["model"], "glm-5.3")
+        self.assertIn("https://opencode.ai/zen/go/v1/chat/completions",
+                      calls[0].full_url)
+
+    def test_an_api_failure_reads_as_an_assistant_failure(self):
+        conf = self.config(assistant_provider="opencode")
+        with self.assertRaises(assistant.AssistantError):
+            assistant.ask("when is it", conf)
+
+
 class Ask(DikteTest):
     def test_a_cli_that_is_not_installed_says_where_to_change_it(self):
         with only_these_tools(), \
@@ -532,6 +798,129 @@ class Ask(DikteTest):
         self.assertEqual(answer, "done")
         self.assertEqual(attempts, ["stale-id", ""])
         self.assertEqual(assistant.stored_provider(), "")
+
+    def test_a_resumed_run_that_dies_is_retried_without_the_session_flag(self):
+        # All the way through the stream this time: the first run exits 1 with
+        # no answer and whatever stderr it liked, and the recovery must not
+        # depend on those words.
+        conf = self.config()
+        assistant.write_session("claude", "stale-id")
+        procs = iter([
+            FakeCli(code=1),
+            FakeCli(events=[{"type": "result", "result": "done"}]),
+        ])
+        cmds = []
+
+        def popen(cmd, **kwargs):
+            cmds.append(cmd)
+            return next(procs)
+
+        with only_these_tools("claude"), \
+                mock.patch.object(subprocess, "Popen", side_effect=popen):
+            answer, _ = assistant.ask("hi", conf)
+        self.assertEqual(answer, "done")
+        self.assertEqual(cmds[0][cmds[0].index("--resume") + 1], "stale-id")
+        self.assertNotIn("--resume", cmds[1])
+
+    def test_a_run_that_dies_with_an_answer_in_hand_is_not_retried(self):
+        conf = self.config()
+        assistant.write_session("claude", "stale-id")
+        calls = []
+
+        def popen(cmd, **kwargs):
+            calls.append(cmd)
+            return FakeCli(events=[{"type": "result", "result": "done"}], code=1)
+
+        with only_these_tools("claude"), \
+                mock.patch.object(subprocess, "Popen", side_effect=popen):
+            answer, _ = assistant.ask("hi", conf)
+        self.assertEqual(answer, "done")
+        self.assertEqual(len(calls), 1)
+
+
+class CodexModels(DikteTest):
+    """The model list read off `codex debug models`."""
+
+    CATALOG = {"models": [
+        {"slug": "gpt-6-mini", "visibility": "list", "priority": 9},
+        {"slug": "gpt-6", "visibility": "list", "priority": 1},
+        {"slug": "codex-auto-review", "visibility": "hide", "priority": 3},
+    ]}
+
+    def models(self, reply, code=0):
+        with only_these_tools("codex"), \
+                mock.patch.object(subprocess, "run",
+                                  return_value=FakeCompleted(
+                                      returncode=code, stdout=reply)) as run:
+            found = assistant.codex_models()
+        self.run_call = run
+        return found
+
+    def test_the_catalog_arrives_best_first_without_the_hidden_ones(self):
+        found = self.models(json.dumps(self.CATALOG))
+        self.assertEqual(found, ["gpt-6", "gpt-6-mini"])
+        self.assertEqual(self.run_call.call_args.args[0],
+                         ["codex", "debug", "models"])
+
+    def test_a_codex_that_is_not_installed_is_not_run(self):
+        with only_these_tools(), \
+                mock.patch.object(subprocess, "run") as run:
+            self.assertEqual(assistant.codex_models(), [])
+        run.assert_not_called()
+
+    def test_a_codex_too_old_to_have_the_command(self):
+        self.assertEqual(self.models("error: unknown subcommand", code=2), [])
+
+    def test_a_catalog_that_is_not_what_was_expected(self):
+        self.assertEqual(self.models(json.dumps(["gpt-6"])), [])
+        self.assertEqual(self.models(""), [])
+
+    def test_a_codex_that_hangs_is_given_up_on(self):
+        with only_these_tools("codex"), \
+                mock.patch.object(subprocess, "run",
+                                  side_effect=subprocess.TimeoutExpired(
+                                      ["codex"], 30)):
+            self.assertEqual(assistant.codex_models(), [])
+
+
+class AgyModels(DikteTest):
+    """The model list read off `agy models`: one id, a tab, a display name."""
+
+    LISTING = ("gemini-4-flash-high\tGemini 4 Flash (High)\n"
+               "gemini-4-flash-low\tGemini 4 Flash (Low)\n"
+               "a line with no tab is not a model\n"
+               "\ta tab with no id in front of it is not one either\n")
+
+    def models(self, reply, code=0):
+        with only_these_tools("agy"), \
+                mock.patch.object(subprocess, "run",
+                                  return_value=FakeCompleted(
+                                      returncode=code, stdout=reply)) as run:
+            found = assistant.agy_models()
+        self.run_call = run
+        return found
+
+    def test_the_listing_arrives_in_agy_s_own_order(self):
+        found = self.models(self.LISTING)
+        self.assertEqual(found, ["gemini-4-flash-high", "gemini-4-flash-low"])
+        self.assertEqual(self.run_call.call_args.args[0], ["agy", "models"])
+
+    def test_an_agy_that_is_not_installed_is_not_run(self):
+        with only_these_tools(), \
+                mock.patch.object(subprocess, "run") as run:
+            self.assertEqual(assistant.agy_models(), [])
+        run.assert_not_called()
+
+    def test_a_call_that_failed_answers_with_nothing(self):
+        self.assertEqual(self.models("error: not logged in", code=1), [])
+        self.assertEqual(self.models(""), [])
+
+    def test_an_agy_that_hangs_is_given_up_on(self):
+        with only_these_tools("agy"), \
+                mock.patch.object(subprocess, "run",
+                                  side_effect=subprocess.TimeoutExpired(
+                                      ["agy"], 30)):
+            self.assertEqual(assistant.agy_models(), [])
 
 
 if __name__ == "__main__":

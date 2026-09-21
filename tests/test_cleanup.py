@@ -1,9 +1,9 @@
-"""Who cleans the transcript up, and what they are asked.
+﻿"""Who cleans the transcript up, and what they are asked.
 
-The CLIs are faked at subprocess.run: what the tests read is the argument list
-each one is given, where the answer is picked up from, and what happens to the
-chain when the program is missing, slow or unhappy. The OpenRouter path is the
-one that was always there and is checked here only for still being taken.
+The CLIs are faked at subprocess.Popen: what the tests read is the argument
+list each one is given, where the answer is picked up from, and what happens to
+the chain when the program is missing, slow or unhappy. The OpenRouter path is
+the one that was always there and is checked here only for still being taken.
 """
 
 import os
@@ -11,25 +11,33 @@ import subprocess
 import unittest
 from unittest import mock
 
-import api
-import cleanup
-import ggml
+from dikte import api
+from dikte import cleanup
+from dikte import ggml
 from tests.support import DikteTest, fake_urlopen, sent_json, url_error
 from tests.test_api import FakeServer, chat_reply
 
 
-def fake_run(stdout="", code=0, stderr="", last_message=""):
-    """Stand in for subprocess.run, writing the file Codex would have written."""
+def fake_cli(stdout="", code=0, stderr="", last_message=""):
+    """Stand in for subprocess.Popen.
+
+    _output hands the process a temporary file for each stream, so the fake
+    writes into those, plus the file Codex would have written on its way out.
+    """
     calls = []
 
-    def run(cmd, **kwargs):
+    def popen(cmd, **kwargs):
         calls.append(cmd)
+        kwargs["stdout"].write(stdout.encode("utf-8"))
+        kwargs["stderr"].write(stderr.encode("utf-8"))
         if last_message and "-o" in cmd:
             with open(cmd[cmd.index("-o") + 1], "w", encoding="utf-8") as fh:
                 fh.write(last_message)
-        return subprocess.CompletedProcess(cmd, code, stdout, stderr)
+        proc = mock.Mock()
+        proc.returncode = code
+        return proc
 
-    return mock.patch.object(subprocess, "run", side_effect=run), calls
+    return mock.patch.object(subprocess, "Popen", side_effect=popen), calls
 
 
 class Provider(DikteTest):
@@ -49,7 +57,10 @@ class Provider(DikteTest):
     def test_what_each_one_runs(self):
         self.assertEqual(cleanup.executable("claude"), "claude")
         self.assertEqual(cleanup.executable("codex"), "codex")
+        self.assertEqual(cleanup.executable("agy"), "agy")
         self.assertEqual(cleanup.executable("openrouter"), "")
+        self.assertEqual(cleanup.executable("gemini"), "")
+        self.assertEqual(cleanup.executable("opencode"), "")
 
     def test_the_model_named_in_the_history_is_the_one_that_did_it(self):
         self.assertEqual(cleanup.model(self.config(cleanup_model="some/model")),
@@ -65,6 +76,19 @@ class Provider(DikteTest):
         self.assertEqual(
             cleanup.model(self.config(cleanup_provider="codex",
                                       cleanup_codex_model="gpt-5.4")), "gpt-5.4")
+        self.assertEqual(
+            cleanup.model(self.config(cleanup_provider="gemini")),
+            "gemini-3.5-flash-lite")
+        # Antigravity is left on its own default the way Codex is.
+        self.assertEqual(
+            cleanup.model(self.config(cleanup_provider="agy")), "agy")
+        self.assertEqual(
+            cleanup.model(self.config(cleanup_provider="agy",
+                                      cleanup_agy_model="gemini-3.7-flash-low")),
+            "gemini-3.7-flash-low")
+        self.assertEqual(
+            cleanup.model(self.config(cleanup_provider="opencode",
+                                      cleanup_opencode_model="glm-5.3")), "glm-5.3")
 
 
 class OpenRouter(DikteTest):
@@ -80,9 +104,75 @@ class OpenRouter(DikteTest):
 
     def test_no_cli_is_started_for_it(self):
         conf = self.config(openrouter_api_key="sk-or-test")
-        patcher, calls = fake_run(stdout="never")
+        patcher, calls = fake_cli(stdout="never")
         with patcher, mock.patch.object(api, "cleanup", return_value="Done."):
             cleanup.run("uh, done", conf, "the rules")
+        self.assertEqual(calls, [])
+
+
+class OpenCode(DikteTest):
+    def test_it_is_one_request_with_the_settings_as_they_were(self):
+        conf = self.config(cleanup_provider="opencode",
+                           opencode_api_key="opencode-test-key",
+                           cleanup_opencode_model="some/model",
+                           cleanup_reasoning="low")
+        with mock.patch.object(api, "cleanup", return_value="Done.") as call:
+            self.assertEqual(cleanup.run("uh, done", conf, "the rules"), "Done.")
+        text, key, model, prompt = call.call_args.args
+        self.assertEqual((text, key, model, prompt),
+                         ("uh, done", "opencode-test-key", "some/model", "the rules"))
+        self.assertEqual(call.call_args.kwargs["reasoning"], "low")
+        self.assertEqual(call.call_args.kwargs["provider"], "opencode")
+        self.assertEqual(call.call_args.kwargs["service"], "OpenCode Go")
+        self.assertEqual(call.call_args.kwargs["base_url"],
+                         "https://opencode.ai/zen/go/v1")
+
+    def test_no_cli_is_started_for_it(self):
+        conf = self.config(cleanup_provider="opencode",
+                           opencode_api_key="opencode-test-key")
+        patcher, calls = fake_cli(stdout="never")
+        with patcher, mock.patch.object(api, "cleanup", return_value="Done."):
+            cleanup.run("uh, done", conf, "the rules")
+        self.assertEqual(calls, [])
+
+
+class GoogleAiStudio(DikteTest):
+    """Cleanup over Google's OpenAI-compatible endpoint: one request, no CLI."""
+
+    def setUp(self):
+        super().setUp()
+        self.conf = self.config(cleanup_provider="gemini",
+                                gemini_api_key="AIza-test")
+
+    def test_it_goes_to_google_with_the_settings_as_they_were(self):
+        self.conf["cleanup_reasoning"] = "none"
+        with fake_urlopen(chat_reply("Done.")) as calls:
+            self.assertEqual(cleanup.run("uh, done", self.conf, "the rules"),
+                             "Done.")
+        self.assertEqual(
+            calls[0].full_url,
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")
+        payload = sent_json(calls[0])
+        self.assertEqual(payload["model"], "gemini-3.5-flash-lite")
+        self.assertEqual(payload["reasoning_effort"], "minimal")
+        self.assertIn("uh, done", payload["messages"][1]["content"])
+
+    def test_the_key_travels_as_a_bearer_token(self):
+        with fake_urlopen(chat_reply("Done.")) as calls:
+            cleanup.run("uh, done", self.conf, "the rules")
+        self.assertEqual(calls[0].get_header("Authorization"), "Bearer AIza-test")
+
+    def test_a_missing_key_names_google_rather_than_openrouter(self):
+        self.conf["gemini_api_key"] = ""
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                self.assertRaises(api.ApiError) as caught:
+            cleanup.run("uh, done", self.conf, "the rules")
+        self.assertIn("Google AI Studio", str(caught.exception))
+
+    def test_no_cli_is_started_for_it(self):
+        patcher, calls = fake_cli(stdout="never")
+        with patcher, fake_urlopen(chat_reply("Done.")):
+            cleanup.run("uh, done", self.conf, "the rules")
         self.assertEqual(calls, [])
 
 
@@ -93,7 +183,7 @@ class ClaudeCode(DikteTest):
         self.patch_attr(cleanup.shutil, "which", lambda name: f"/usr/bin/{name}")
 
     def run_cleanup(self, text="uh, book it", **kwargs):
-        patcher, calls = fake_run(**kwargs)
+        patcher, calls = fake_cli(**kwargs)
         with patcher:
             answer = cleanup.run(text, self.conf, "the rules")
         return answer, calls[0]
@@ -146,14 +236,18 @@ class ClaudeCode(DikteTest):
             self.run_cleanup(stdout="Book it.")
         self.assertIn("claude", str(caught.exception))
 
-    def test_a_run_that_never_ends(self):
-        def run(cmd, **kwargs):
-            raise subprocess.TimeoutExpired(cmd, 180)
+    def test_a_run_that_never_ends_is_killed_with_its_whole_tree(self):
+        def popen(cmd, **kwargs):
+            proc = mock.Mock()
+            proc.wait.side_effect = subprocess.TimeoutExpired(cmd, 180)
+            return proc
 
-        with mock.patch.object(subprocess, "run", side_effect=run):
+        with mock.patch.object(subprocess, "Popen", side_effect=popen), \
+                mock.patch.object(cleanup.assistant, "kill_tree") as kill:
             with self.assertRaises(cleanup.CleanupError) as caught:
                 cleanup.run("uh, book it", self.conf, "the rules")
         self.assertIn("180", str(caught.exception))
+        kill.assert_called_once()
 
 
 class Codex(DikteTest):
@@ -163,7 +257,7 @@ class Codex(DikteTest):
         self.patch_attr(cleanup.shutil, "which", lambda name: f"/usr/bin/{name}")
 
     def run_cleanup(self, text="uh, book it", **kwargs):
-        patcher, calls = fake_run(**kwargs)
+        patcher, calls = fake_cli(**kwargs)
         with patcher:
             answer = cleanup.run(text, self.conf, "the rules")
         return answer, calls[0]
@@ -207,6 +301,63 @@ class Codex(DikteTest):
     def test_an_answer_of_nothing(self):
         with self.assertRaises(cleanup.CleanupError):
             self.run_cleanup(stdout="tokens used 400", last_message="")
+
+
+class Antigravity(DikteTest):
+    def setUp(self):
+        super().setUp()
+        self.conf = self.config(cleanup_provider="agy")
+        self.patch_attr(cleanup.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    def run_cleanup(self, text="uh, book it", **kwargs):
+        patcher, calls = fake_cli(**kwargs)
+        with patcher:
+            answer = cleanup.run(text, self.conf, "the rules")
+        return answer, calls[0]
+
+    def test_the_rules_ride_in_front_of_the_transcript(self):
+        answer, cmd = self.run_cleanup(stdout="Book it.\n")
+        self.assertEqual(answer, "Book it.")
+        self.assertEqual(cmd[0], "agy")
+        self.assertEqual(cmd[cmd.index("-p") + 1],
+                         "the rules\n\n---\n\n<transcript>\nuh, book it\n</transcript>")
+
+    def test_it_starts_somewhere_of_its_own_and_takes_no_slash_commands(self):
+        """Without --new-project agy works in whichever project it was last in."""
+        _, cmd = self.run_cleanup(stdout="Book it.")
+        self.assertIn("--new-project", cmd)
+        self.assertIn("--disable-slash-commands", cmd)
+        self.assertEqual(cmd[cmd.index("--output-format") + 1], "text")
+
+    def test_it_is_not_left_to_give_up_before_the_caller_does(self):
+        _, cmd = self.run_cleanup(stdout="Book it.")
+        self.assertEqual(cmd[cmd.index("--print-timeout") + 1], "180s")
+
+    def test_the_model_is_left_alone_until_one_is_typed_in(self):
+        _, cmd = self.run_cleanup(stdout="Book it.")
+        self.assertNotIn("--model", cmd)
+        self.conf["cleanup_agy_model"] = "gemini-3.7-flash-low"
+        _, cmd = self.run_cleanup(stdout="Book it.")
+        self.assertEqual(cmd[cmd.index("--model") + 1], "gemini-3.7-flash-low")
+
+    def test_the_thinking_setting_lands_on_the_nearest_rung_agy_has(self):
+        self.conf["cleanup_reasoning"] = "max"
+        _, cmd = self.run_cleanup(stdout="Book it.")
+        self.assertEqual(cmd[cmd.index("--effort") + 1], "high")
+
+    def test_no_thinking_setting_means_no_flag(self):
+        _, cmd = self.run_cleanup(stdout="Book it.")
+        self.assertNotIn("--effort", cmd)
+
+    def test_an_answer_of_nothing_is_a_failure_rather_than_an_empty_paste(self):
+        with self.assertRaises(cleanup.CleanupError):
+            self.run_cleanup(stdout="   ")
+
+    def test_a_program_that_is_not_installed_says_so_before_running_anything(self):
+        self.patch_attr(cleanup.shutil, "which", lambda name: "")
+        with self.assertRaises(cleanup.CleanupError) as caught:
+            self.run_cleanup(stdout="Book it.")
+        self.assertIn("agy", str(caught.exception))
 
 
 if __name__ == "__main__":
@@ -260,6 +411,52 @@ class Here(DikteTest):
             cleanup.run("uh, done", self.conf, "the rules")
         self.assertEqual(sent_json(calls[0])["max_tokens"], 512)
 
+    def test_thinking_is_given_room_of_its_own_rather_than_the_answer_s(self):
+        # llama.cpp counts the thinking towards the same ceiling, so a rung that
+        # took its budget out of the answer would leave a short dictation with
+        # nothing to reply with. On a context roomy enough that the clamp the
+        # top rung would otherwise meet is not what is being measured.
+        self.patch_attr(ggml, "llm", FakeServer(context=32768))
+        for rung, room in api.THINKING_ROOM.items():
+            with self.subTest(rung=rung):
+                self.conf["local_llm_reasoning"] = rung
+                with fake_urlopen(chat_reply("Done.")) as calls:
+                    cleanup.run("uh, done", self.conf, "the rules")
+                self.assertEqual(sent_json(calls[0])["max_tokens"], 512 + room)
+
+    def test_each_rung_of_the_ladder_thinks_longer_than_the_one_below(self):
+        rungs = [api.THINKING_ROOM[name] for name in
+                 ("minimal", "low", "medium", "high", "xhigh", "max")]
+        self.assertEqual(rungs, sorted(rungs))
+        self.assertEqual(len(set(rungs)), len(rungs))
+
+    def test_the_models_own_default_is_given_room_to_think_in_too(self):
+        # Nothing is sent, so a template that thinks will think, and the ceiling
+        # has to survive that as well.
+        self.conf["local_llm_reasoning"] = ""
+        with fake_urlopen(chat_reply("Done.")) as calls:
+            cleanup.run("uh, done", self.conf, "the rules")
+        self.assertEqual(sent_json(calls[0])["max_tokens"],
+                         512 + api.DEFAULT_THINKING_ROOM)
+
+    def test_the_ceiling_stays_under_the_context_the_server_was_started_with(self):
+        # Above the context there is no ceiling at all: the runaway would run to
+        # the end of the context instead of stopping where this says.
+        self.patch_attr(ggml, "llm", FakeServer(context=2048))
+        self.conf["local_llm_reasoning"] = "max"
+        with fake_urlopen(chat_reply("Done.")) as calls:
+            cleanup.run("uh, done", self.conf, "the rules")
+        self.assertLess(sent_json(calls[0])["max_tokens"], 2048)
+
+    def test_the_prompt_keeps_its_share_of_a_small_context(self):
+        self.patch_attr(ggml, "llm", FakeServer(context=2048))
+        self.conf["local_llm_reasoning"] = "max"
+        with fake_urlopen(chat_reply("Done.")) as calls:
+            cleanup.run("x" * 2000, self.conf, "the rules")
+        # 2048 less half the characters of prompt and transcript together.
+        self.assertEqual(sent_json(calls[0])["max_tokens"],
+                         2048 - (len("the rules") + 2000) // 2)
+
     def test_a_reply_that_was_all_thinking_names_the_setting_that_fixes_it(self):
         reply = {"choices": [{"message": {"content": "", "reasoning": "hmm"}}]}
         with fake_urlopen(reply), self.assertRaises(api.ApiError) as caught:
@@ -280,7 +477,8 @@ class Here(DikteTest):
         self.assertIn("out of memory", str(caught.exception))
 
     def test_no_cli_is_started_for_it(self):
-        patcher, calls = fake_run(stdout="never")
+        patcher, calls = fake_cli(stdout="never")
         with patcher, fake_urlopen(chat_reply("Done.")):
             cleanup.run("uh, done", self.conf, "the rules")
         self.assertEqual(calls, [])
+

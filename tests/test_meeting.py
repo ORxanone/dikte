@@ -11,9 +11,9 @@ import unittest
 import wave
 from unittest import mock
 
-import api
-import config as cfg
-import meeting
+from dikte import api
+from dikte import config as cfg
+from dikte import meeting
 from tests.support import DikteTest, make_wav, silence, speech, stereo, tone
 
 

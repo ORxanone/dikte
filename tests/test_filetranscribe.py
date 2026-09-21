@@ -13,8 +13,8 @@ import unittest
 import wave
 from unittest import mock
 
-import api
-import filetranscribe as ft
+from dikte import api
+from dikte import filetranscribe as ft
 from tests.support import DikteTest, make_wav, silence, tone
 
 
@@ -214,13 +214,47 @@ class ChunkSeconds(DikteTest):
         self.assertEqual(ft.chunk_seconds(self.file(1024), 600), 0.0)
 
     def test_a_file_over_the_limit_is_cut_by_what_it_measured(self):
-        # Twice the limit over an hour, so a little under half an hour fits.
-        seconds = ft.chunk_seconds(self.file(ft.UPLOAD_LIMIT * 2), 3600)
-        self.assertGreater(seconds, 1500)
-        self.assertLess(seconds, 1800)
+        # Twice the limit over twenty minutes, so a little under ten fits.
+        seconds = ft.chunk_seconds(self.file(ft.UPLOAD_LIMIT * 2), 1200)
+        self.assertGreater(seconds, 500)
+        self.assertLess(seconds, 600)
+
+    def test_a_chunk_is_never_more_audio_than_a_request_can_outlive(self):
+        """An hour in one request is a 502 from the gateway, whatever it weighs."""
+        self.assertEqual(ft.chunk_seconds(self.file(ft.UPLOAD_LIMIT * 2), 3600),
+                         ft.MAX_CHUNK_SECONDS)
+
+    def test_a_small_file_that_is_still_hours_long_is_cut_on_the_clock(self):
+        self.assertEqual(ft.chunk_seconds(self.file(1024), 7200),
+                         ft.MAX_CHUNK_SECONDS)
+
+    def test_a_file_short_enough_on_both_counts_is_not_cut(self):
+        self.assertEqual(ft.chunk_seconds(self.file(1024), ft.MAX_CHUNK_SECONDS), 0.0)
 
     def test_a_file_with_no_length_is_left_whole(self):
         self.assertEqual(ft.chunk_seconds(self.file(ft.UPLOAD_LIMIT * 2), 0), 0.0)
+
+
+class Ffmpeg(DikteTest):
+    """How the converter process is started."""
+
+    def test_its_output_is_read_as_utf8_whatever_the_locale_says(self):
+        """ffmpeg writes UTF-8; read as the locale codepage its messages
+        mojibake, and a byte the codepage cannot place raises from inside
+        communicate itself."""
+        out = str(self.path("out.wav"))
+        with open(out, "wb") as fh:
+            fh.write(b"\x00")
+        proc = mock.Mock()
+        proc.communicate.return_value = ("", "")
+        proc.returncode = 0
+        proc.poll.return_value = 0
+        with mock.patch.object(ft.subprocess, "Popen", return_value=proc) as popen:
+            ft._ffmpeg(["-i", "in.mp4", out], out)
+        kwargs = popen.call_args.kwargs
+        self.assertTrue(kwargs["text"])
+        self.assertEqual(kwargs["encoding"], "utf-8")
+        self.assertEqual(kwargs["errors"], "replace")
 
 
 class Chunks(DikteTest):
@@ -377,6 +411,58 @@ class Transcriber(DikteTest):
         worker = ft.FileTranscriber(self.conf)
         worker.stop()
         self.assertTrue(worker._abort.aborted)
+
+    def test_a_chunk_is_given_longer_to_answer_than_a_dictation(self):
+        """A quarter hour of audio is not a sentence: the default would cut it off."""
+        worker = ft.FileTranscriber(self.conf)
+        with mock.patch.object(ft, "_to_wav", side_effect=lambda *a: self.source), \
+                mock.patch.object(ft, "_to_mp3",
+                                  side_effect=lambda path, *a, **k: path), \
+                mock.patch.object(ft.shutil, "which", return_value="/usr/bin/ffmpeg"), \
+                mock.patch.object(api, "transcribe", return_value="text") as call:
+            worker._work(self.source, False, False)
+        self.assertEqual(call.call_args.kwargs["timeout"], ft.HOSTED_TIMEOUT)
+
+    def test_a_gateway_having_a_bad_moment_is_asked_again(self):
+        with mock.patch.object(ft.FileTranscriber, "_wait"):
+            done, failures, progress, _ = self.run_chain(
+                fail=[api.ApiError("HTTP 502: timeout", 502), "raw text"])
+        self.assertEqual(failures, [])
+        self.assertEqual(done[0][0], "raw text")
+        self.assertTrue(any("Trying again" in message for message in progress))
+
+    def test_a_rejected_key_is_not_asked_again(self):
+        """Trying again with the same key is only a slower way to fail."""
+        call = mock.Mock(side_effect=api.ApiError("rejected the API key", 401))
+        with mock.patch.object(ft.FileTranscriber, "_wait"):
+            _, failures, _, _ = self.run_chain(fail=call)
+        self.assertEqual(call.call_count, 1)
+        self.assertIn("rejected", failures[0])
+
+    def test_a_chunk_is_given_up_on_after_the_last_try(self):
+        call = mock.Mock(side_effect=api.ApiError("HTTP 502: timeout", 502))
+        with mock.patch.object(ft.FileTranscriber, "_wait"):
+            _, failures, _, _ = self.run_chain(fail=call)
+        self.assertEqual(call.call_count, ft.RETRIES)
+        self.assertIn("502", failures[0])
+
+    def test_what_was_heard_before_the_failure_is_still_handed_over(self):
+        """An hour already transcribed is not thrown away over the chunk after it."""
+        boom = api.ApiError("HTTP 502: timeout", 502)
+        with mock.patch.object(ft.FileTranscriber, "_wait"), \
+                mock.patch.object(ft.FileTranscriber, "_chunks",
+                                  side_effect=lambda wav, *a: [(wav, 0.0), (wav, 10.0)]):
+            done, failures, _, _ = self.run_chain(
+                fail=["first half"] + [boom] * ft.RETRIES)
+        self.assertEqual(done[0][0], "first half")
+        self.assertIn("502", failures[0])
+
+    def test_nothing_heard_at_all_is_a_plain_failure(self):
+        call = mock.Mock(side_effect=api.ApiError("rejected the API key", 401))
+        with mock.patch.object(ft.FileTranscriber, "_wait"):
+            done, failures, _, _ = self.run_chain(fail=call)
+        self.assertEqual(done, [])
+        self.assertEqual(failures[0], "rejected the API key")
 
     def test_a_second_start_while_one_is_running_is_ignored(self):
         worker = ft.FileTranscriber(self.conf)

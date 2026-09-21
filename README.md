@@ -5,23 +5,42 @@ machine by default, a model cleans it up (dropping the *uh*s, the restarts, the
 missing punctuation), and the result lands in your clipboard and is pasted into
 whatever window you were typing in.
 
-Built for KDE Plasma 6 on Wayland, and runs on GNOME X11 and macOS too. No
-dependencies beyond system packages: just the Python standard library, 3.11 or
-newer, and PyQt6.
+Built for KDE Plasma 6 on Wayland, and runs on GNOME X11, macOS,
+[Windows](README.windows.md) and any other Linux desktop that will let it read
+the keyboard. No dependencies beyond system packages: just the Python standard
+library, 3.11 or newer, and PyQt6.
 
 *[Türkçe README](README.tr.md)*
 
 <p align="center">
-  <img src="docs/settings-general.webp" width="820" alt="Dikte settings, General tab">
+  <img src="docs/home.webp" width="620" alt="Dikte, Nord theme">
+  <br><sub>Nord (default)</sub>
 </p>
+
+| Dracula | Classic dark | Classic light |
+|---|---|---|
+| <img src="docs/home-dracula.webp" width="270" alt="Dikte, Dracula"> | <img src="docs/home-dark.webp" width="270" alt="Dikte, Classic dark"> | <img src="docs/home-light.webp" width="270" alt="Dikte, Classic light"> |
 
 |  |  |
 |---|---|
+| <img src="docs/settings-general.webp" width="410" alt="General and themes"> | <img src="docs/settings-display.webp" width="410" alt="Nord, Dracula, dark, light"> |
 | <img src="docs/settings-api.webp" width="410" alt="API and models"> | <img src="docs/settings-cleanup.webp" width="410" alt="Cleanup rules"> |
 | <img src="docs/settings-agent.webp" width="410" alt="Agent"> | <img src="docs/settings-meeting.webp" width="410" alt="Meeting"> |
 | <img src="docs/settings-audio-file.webp" width="410" alt="Audio file"> | <img src="docs/settings-shortcuts.webp" width="410" alt="Shortcuts"> |
 
 ## Install
+
+The [releases page](../../releases) has an AppImage, a disk image per Mac
+architecture and a Windows setup. The first two write their own menu entry,
+login item and `dikte` command the first time they run, and stand aside for an
+installation already on the machine; `dikte integrate --remove` takes them
+back. The AppImage still wants the system packages below, for the sound
+server, the clipboard and the keyboard. The disk image is signed with no Apple
+certificate, so the first launch is refused until you press **Open Anyway**
+under System Settings → Privacy & Security, and macOS asks for the microphone
+and Accessibility again after each update; installing from a checkout is what
+avoids that. The Windows setup installs for your account alone and carries an
+ffmpeg with it.
 
 ```sh
 sudo pacman -S --needed pipewire-audio wl-clipboard ydotool ffmpeg python-pyqt6
@@ -55,23 +74,60 @@ tools instead:
 sudo apt install pulseaudio-utils xclip xdotool ffmpeg
 ```
 
-macOS has no shortcut registry for `install.sh` to install into, so the listener
-that catches the keys is the mechanism there and there is nothing to run:
-`brew install ffmpeg`, `pip install PyQt6`, then `python dikte.py`. A meeting
-needs BlackHole or Loopback, because nothing else offers what the speakers are
-playing.
+On macOS the same `./install.sh` runs and hands over to `scripts/install-mac.sh`, which
+puts down a `Dikte.app` in `~/Applications`, the `dikte` command and a
+LaunchAgent:
+
+```sh
+brew install pyqt ffmpeg   # pyqt brings a Python newer than Apple's 3.9 with it
+
+./install.sh               # or:  ./install.sh "Ctrl+Option+Space" "Ctrl+Option+D"
+open -a Dikte
+```
+
+The bundle is what macOS files the **Microphone** and **Accessibility**
+permissions against, and it asks for each the first time it needs one. The
+default there is `Ctrl+Option+Space`, since macOS keeps `Ctrl+Space` for the
+input-source switch, and nothing needs a logout: Dikte holds the combination
+itself while it runs. PyQt6 comes from brew rather than pip because Homebrew's
+Python refuses to be installed into, and `DIKTE_PYTHON=…/venv/bin/python
+./install.sh` points the installer at a virtualenv instead.
+
+Local speech to text is the one piece that has to be built by hand there:
+whisper.cpp publishes no macOS binary and Homebrew's is configured with
+`WHISPER_BUILD_SERVER=OFF`, so it installs `whisper-cli` and not the server
+Dikte talks to. Build it (`cmake -B build -DWHISPER_BUILD_SERVER=ON
+-DGGML_METAL=ON && cmake --build build -j`) and give Settings → API the path, or
+transcribe in the cloud. A meeting needs BlackHole or Loopback
+(`brew install blackhole-2ch`); dictation does not.
+
+Windows works the same way, holding the keys through the system's own hotkey
+service while Dikte runs. The setup on the releases page carries the ffmpeg
+recording needs and asks for no administrator; from a checkout it is `winget
+install Gyan.FFmpeg`, `pip install PyQt6`, then `python -m dikte`, with an
+optional `install.ps1` for the Start Menu entry and the `dikte` command.
+Meetings are not supported there yet; the details are in the
+[Windows README](README.windows.md).
 
 `install.sh` adds the `dikte` command, a menu entry, an autostart entry and the
-two global shortcuts, whose keys are its two arguments. `./update.sh` pulls and
-puts all of that back, keeping the keys you chose; `./uninstall.sh` takes it away
-again and leaves your settings and dictations alone unless you pass `--purge`.
+two global shortcuts, whose keys are its two arguments, or the ones already in
+your settings when it is given none. `./scripts/update.sh` pulls and puts all of
+that back; `./scripts/uninstall.sh` takes it away again and leaves your settings
+and dictations alone unless you pass `--purge`. Dikte looks at the releases page
+once a day and puts a line in the tray menu when a newer version is out, which
+opens the page rather than installing anything; the General tab turns that off
+or runs it on the spot.
 
 Speech to text and cleanup each pick a provider in the settings window, and both
 run here by default, on models of your own. The cloud is the other option:
 speech to text on **OpenAI**, **Groq** or **OpenRouter** (`gpt-4o-transcribe`),
-cleanup on OpenRouter (`google/gemini-3.5-flash-lite`) or, when either is
-installed, on Claude Code or Codex. The keys fall back to `OPENAI_API_KEY`,
-`GROQ_API_KEY` and `OPENROUTER_API_KEY`, and are stored in
+cleanup on OpenRouter (`google/gemini-3.5-flash-lite`), on **Google AI Studio**
+(`gemini-3.5-flash-lite`), on **OpenCode Go** (`deepseek-v4-flash`) or, when one
+of them is installed, on Claude Code, Codex or Antigravity. The first three are
+a single HTTP request; the three CLIs each open a whole session to do it, which
+is where their few extra seconds go. The keys fall back to `OPENAI_API_KEY`,
+`GROQ_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY` and `OPENCODE_API_KEY`,
+and are stored in
 `~/.config/dikte/config.json`, mode 600, or in
 `~/Library/Application Support/Dikte` on a Mac. Cleanup can be switched off, in
 which case the raw transcript is pasted, and a thinking model's effort can be
@@ -82,16 +138,19 @@ set next to it.
 | What | How |
 | --- | --- |
 | Start / stop recording | `Ctrl+Space`, or click the tray icon |
+| Pause / resume the recording | Tray menu, `dikte pause`, or a key you set |
 | Discard the recording | `Ctrl+Alt+Space`, tray menu, or `dikte cancel` |
 | Speak a command to an agent | Tray menu → *Ask Claude*, or `dikte ask` |
 | Start / end a meeting | Tray menu → *Record a meeting*, or `dikte meeting` |
 | Settings | Tray menu → *Settings*, or `dikte settings` |
+| Look for a newer version | General tab → *Check now*, or `dikte update` |
 | Reload after an update | Tray menu → *Restart*, or `dikte restart` |
 | Quit | Tray menu → *Quit*, or `dikte quit` |
 
 An indicator in the screen corner shows a red dot, a live waveform and the
 elapsed time, then the stage it is on. It never takes focus. Pressing
-`Ctrl+Space` again while Dikte is still working does nothing; nothing queues up.
+`Ctrl+Space` again while the last dictation is still being cleaned up starts
+the next one; it is transcribed and pasted in turn, behind the one still going.
 A dictation and a command to the agent do wait on each other for the microphone,
 which is one device, but for nothing else: each has its own indicator, and the
 second one stacks above the first while both are up.
@@ -108,9 +167,14 @@ running.
 - **It all runs on this machine by default.** Speech to text on whisper.cpp and
   cleanup on llama.cpp, neither installed beforehand: the settings window fetches
   the program and the model, verifies the sha256 and refuses a download published
-  without one, then keeps a server alive while you dictate. The graphics card is
+  without one, then keeps a server alive while you dictate and hands the memory
+  back once it has sat unused for ten minutes. The model list is
+  grouped by model rather than by file size, and the row this machine's memory
+  and graphics can take is marked. The graphics card is
   reached through CUDA, ROCm or Vulkan where the build allows. No key, no
-  account, nothing leaving the machine.
+  account, nothing leaving the machine. On x86_64 Linux the same button fetches
+  a Vulkan build of whisper-server that Dikte publishes itself, because
+  upstream's Linux archive is processor-only.
 - **Silence never reaches the API.** Handed near-silence, a transcription model
   invents a sentence instead of returning nothing ("Thanks for watching", or in
   Turkish "Altyazı M.K."). A recording is dropped when nothing rose 10 dB above
@@ -140,11 +204,13 @@ running.
   what comes of it: the answer, or a sentence saying what was done. It is the
   session you would have opened yourself, so your skills and connected services
   are there, which is what makes "put that in my calendar on Thursday at three"
-  a thing you can say to a window that is not Claude. Codex (`codex exec`) runs
-  the same way, and OpenRouter is there as a plain question-and-answer fallback
-  for a machine with neither CLI on it. Provider, model, permissions and working
-  directory are under Settings → Agent, and commands close together stay in one
-  conversation.
+  a thing you can say to a window that is not Claude. Codex (`codex exec`) and
+  Antigravity (`agy -p`) run the same way, though Antigravity takes neither a
+  permission mode nor a sandbox from Dikte: what it may do without asking is
+  whatever its own allow-rules say. OpenRouter or OpenCode Go is there as a
+  plain question-and-answer fallback for a machine with no CLI on it. Provider,
+  model, permissions and working directory are under Settings → Agent, and
+  commands close together stay in one conversation.
 - **Meetings** are recorded from the microphone and the speaker output at the
   same time, which settles who said what by the channel a voice arrived on
   instead of guessing at it. The two sides are transcribed separately and
@@ -160,45 +226,65 @@ running.
   written for subtitles, so the lines keep their place and nothing is shortened.
 - **History** of every dictation under Settings → History, with a size limit and
   right-click to delete.
+- **The speech language is detected, not picked.** Auto is the default: whisper
+  on this machine says what it heard, the hosted providers transcribe in
+  whatever language comes in without being told, and the detected language
+  lands in the history and decides which cleanup prompt (Turkish or the
+  language-agnostic one) a run gets. A fixed language still overrides it.
 - **Turkish and English interface**, following the system locale by default.
 - **Azerbaijani** is one of the speech languages, with cleanup, subtitle,
   minutes and agent prompts written for it rather than borrowed from the
   Turkish ones. [What to set, and what it cannot fix](docs/azerbaijani.md).
 
-## The global shortcuts need one logout
+## The global shortcuts, and the logout KDE needs
 
 KWin only reads `kglobalshortcutsrc` at startup, so the shortcuts `install.sh`
 writes will not fire until you log out and back in. Until then, Settings →
 Shortcuts → **built-in listener** reads `/dev/input` and catches the combination
 itself. The difference: it does not swallow the key, so `Ctrl+Space` also reaches
 the focused application (some editors will pop up autocomplete). The listener
-needs your user in the `input` group: `sudo usermod -aG input $USER`.
+needs your user in the `input` group: `sudo usermod -aG input $USER`. On GNOME
+the shortcut works the moment it is installed, and on a desktop that keeps no
+registry at all (i3, XFCE, sway and most others) the listener is the whole
+mechanism: nothing is installed, nothing waits for a logout, and Settings →
+Shortcuts shows the command to bind if you would rather your desktop owned the
+keys.
 
 ## Layout
 
+Everything below is in the `dikte` package, which is what `python3 -m dikte`
+runs and what the `__main__.py` in it hands to every launcher and shortcut.
+`scripts/` holds install-mac.sh, update.sh, uninstall.sh and release.sh;
+`packaging/` builds the AppImage, the disk image and the Windows setup that
+release.sh's tag publishes; install.sh stays at the top, and `tests/` has a
+file per module.
+
 ```
-dikte.py          entry point, tray icon, state machine
+app.py            entry point, tray icon, state machine
 cli.py            the command line: every verb, and what it answers with
 ipc.py            one request and one reply over the local socket
 audio.py          PCM capture: pw-record for dictation, ffmpeg for a meeting
 meeting.py        channel split, speaker labelling, cleanup, minutes
-assistant.py      running a dictation through Claude Code, Codex or OpenRouter
+assistant.py      handing a dictation to Claude Code, Codex, agy or a chat model
 api.py            transcription and cleanup requests (stdlib only)
-cleanup.py        who rewrites the transcript: OpenRouter, here, Claude or Codex
+cleanup.py        who rewrites the transcript: a hosted model, one here, a CLI
 ggml.py           whisper.cpp and llama.cpp here: fetch, verify, keep serving
 hub.py            what GitHub and Hugging Face have on offer today
+update.py         whether a newer release is out, and the page it is on
 worker.py         transcribe → clean up → clipboard → paste
 vad.py            deciding whether a recording holds speech at all
 filetranscribe.py file transcription: ffmpeg, chunking, timestamps
 overlay.py        the corner indicator
 settings_ui.py    settings window
-hotkey.py         KDE shortcut installation and the evdev listener
-paste.py          wl-clipboard and ydotool wrappers
+hotkey.py         the desktop's shortcut registry, the evdev listener, Carbon on a Mac
+paste.py          wl-clipboard and ydotool wrappers, pbcopy and CoreGraphics
+trayicon.py       the tray icons, drawn where there is no icon theme
+integrate.py      what a downloaded build writes into the desktop it landed on
 i18n.py           the string table
 ```
 
 The indicator is drawn through XWayland, because a Wayland client cannot place a
-window in a screen corner; `dikte.py` sets `QT_QPA_PLATFORM=xcb` for that.
+window in a screen corner; `app.py` sets `QT_QPA_PLATFORM=xcb` for that.
 
 ## License
 

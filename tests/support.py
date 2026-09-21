@@ -22,9 +22,11 @@ import urllib.request
 import wave
 from unittest import mock
 
-import assistant
-import config as cfg
-import i18n
+from dikte import assistant
+from dikte import config as cfg
+from dikte import ggml
+from dikte import i18n
+from dikte import update
 
 # What the application is, rather than what it does: PipeWire, wl-clipboard,
 # ydotool, KDE's shortcut file, /dev/input. A port to another desktop replaces
@@ -38,6 +40,18 @@ import i18n
 linux_only = unittest.skipUnless(
     sys.platform.startswith("linux"),
     "covers the Linux desktop stack (PipeWire, wl-clipboard, ydotool, KDE)",
+)
+
+# The launchers a downloaded build writes for itself. There are two downloads,
+# an AppImage and a disk image, so `integrate` has a Linux half and a macOS half
+# and no third one, and the tests that pin them stand in a home laid out the way
+# those two systems lay one out: paths that start at the root, a $HOME the
+# library reads, a symlink for the command. None of that is a Windows machine,
+# where the same code never runs. A Windows build would add an entry there and
+# take the mark off these.
+posix_only = unittest.skipIf(
+    sys.platform == "win32",
+    "covers what an AppImage and a .app write into the desktop they landed on",
 )
 
 
@@ -74,11 +88,33 @@ class DikteTest(unittest.TestCase):
             MEETINGS_FILE=data_dir / "meetings.jsonl",
         )
         # Resolved from cfg.DATA_DIR when assistant was imported, so it needs
-        # moving on its own.
+        # moving on its own. The same goes for where the update check writes
+        # down when it last ran.
         self.patch_attr(assistant, "SESSION_FILE", data_dir / "assistant.json")
+        self.patch_attr(update, "STATE_FILE", data_dir / "update.json")
+        # ggml resolves its own three from paths.DATA_DIR at import, the same
+        # way cfg does. Left alone, a test asking what is installed or what the
+        # last server ran on would be reading whatever this machine happens to
+        # have downloaded, and passing or failing on somebody's home directory.
+        # program_path prefers a whisper-server or llama-server on the PATH
+        # over the copy Dikte downloaded, so on a machine with whisper.cpp
+        # installed these tests would be answering from that copy instead of
+        # from the install they set up. Every other tool still resolves; the
+        # tests that are about the system build patch this again themselves.
+        _which = shutil.which
+        self.patch_attr(shutil, "which", lambda tool, *args, **rest: (
+            None if tool in ("whisper-server", "llama-server")
+            else _which(tool, *args, **rest)))
+        self.patch_attr(ggml, "DATA_DIR", data_dir)
+        self.patch_attr(ggml, "BIN_DIR", data_dir / "bin")
+        self.patch_attr(ggml, "MODELS_DIR", data_dir / "models")
 
         i18n.set_language("en")
         self.addCleanup(i18n.set_language, "en")
+
+        # Read once and kept for the life of the process, which across a test
+        # run means one test's machine answering for the next one's.
+        self.patch_attr(ggml, "_MEMORY", None)
 
         # cli.launch_gui replaces this process with the application when no
         # instance is running. A test that reaches it would take the whole run

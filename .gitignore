@@ -2,3 +2,6 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+# What packaging/ works in and leaves behind.
+build/
+dist/

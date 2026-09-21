@@ -9,7 +9,7 @@ import string
 import unittest
 from unittest import mock
 
-import i18n
+from dikte import i18n
 from tests.support import DikteTest
 
 
