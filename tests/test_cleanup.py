@@ -136,6 +136,37 @@ class OpenCode(DikteTest):
         self.assertEqual(calls, [])
 
 
+class Requesty(DikteTest):
+    def test_it_is_one_request_with_the_settings_as_they_were(self):
+        conf = self.config(cleanup_provider="requesty",
+                           requesty_api_key="rqsty-test-key",
+                           cleanup_requesty_model="some/model",
+                           cleanup_reasoning="low")
+        with mock.patch.object(api, "cleanup", return_value="Done.") as call:
+            self.assertEqual(cleanup.run("uh, done", conf, "the rules"), "Done.")
+        text, key, model, prompt = call.call_args.args
+        self.assertEqual((text, key, model, prompt),
+                         ("uh, done", "rqsty-test-key", "some/model", "the rules"))
+        self.assertEqual(call.call_args.kwargs["reasoning"], "low")
+        self.assertEqual(call.call_args.kwargs["provider"], "requesty")
+        self.assertEqual(call.call_args.kwargs["service"], "Requesty")
+        self.assertEqual(call.call_args.kwargs["base_url"],
+                         "https://router.requesty.ai/v1")
+
+    def test_the_model_recorded_is_its_own(self):
+        conf = self.config(cleanup_provider="requesty",
+                           cleanup_requesty_model="gpt-5.4-mini")
+        self.assertEqual(cleanup.model(conf), "gpt-5.4-mini")
+
+    def test_no_cli_is_started_for_it(self):
+        conf = self.config(cleanup_provider="requesty",
+                           requesty_api_key="rqsty-test-key")
+        patcher, calls = fake_cli(stdout="never")
+        with patcher, mock.patch.object(api, "cleanup", return_value="Done."):
+            cleanup.run("uh, done", conf, "the rules")
+        self.assertEqual(calls, [])
+
+
 class GoogleAiStudio(DikteTest):
     """Cleanup over Google's OpenAI-compatible endpoint: one request, no CLI."""
 

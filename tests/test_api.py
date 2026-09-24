@@ -33,6 +33,8 @@ OPENAI = api.Target("openai", "OpenAI", "sk-test", api.OPENAI_URL, "gpt-4o-trans
 GROQ = api.Target("groq", "Groq", "gsk-test", api.GROQ_URL, "whisper-large-v3-turbo")
 OPENROUTER = api.Target("openrouter", "OpenRouter", "sk-or-test",
                         api.OPENROUTER_URL, "openai/gpt-4o-transcribe")
+REQUESTY = api.Target("requesty", "Requesty", "rqsty-test",
+                      api.REQUESTY_URL, "openai/gpt-4o-transcribe")
 
 
 class TimestampModel(unittest.TestCase):
@@ -41,6 +43,10 @@ class TimestampModel(unittest.TestCase):
 
     def test_openrouter_namespaces_the_id(self):
         self.assertEqual(api.timestamp_model("openrouter"), "openai/whisper-1")
+
+    def test_requesty_namespaces_the_id_too(self):
+        self.assertEqual(api.timestamp_model("requesty", "openai/gpt-4o-transcribe"),
+                         "openai/whisper-1")
 
     def test_groq_keeps_the_model_that_was_chosen(self):
         """Every model it transcribes with is a whisper, so all of them do times."""
@@ -204,6 +210,11 @@ class Headers(unittest.TestCase):
         self.assertEqual(headers["HTTP-Referer"], api.APP_URL)
         self.assertEqual(headers["X-Title"], "Dikte")
 
+    def test_requesty_is_told_who_is_calling_too(self):
+        headers = api._headers("requesty", "rqsty-test")
+        self.assertEqual(headers["HTTP-Referer"], api.APP_URL)
+        self.assertEqual(headers["X-Title"], "Dikte")
+
     def test_a_content_type_is_added_when_there_is_a_body(self):
         headers = api._headers("openai", "k", "application/json")
         self.assertEqual(headers["Content-Type"], "application/json")
@@ -264,6 +275,16 @@ class Transcribe(DikteTest):
         self.assertEqual(calls[0].full_url,
                          "https://api.groq.com/openai/v1/audio/transcriptions")
         self.assertEqual(multipart_fields(calls[0])["model"], "whisper-large-v3-turbo")
+
+    def test_requesty_goes_to_requesty_with_the_glossary(self):
+        with fake_urlopen({"text": "hi"}) as calls:
+            api.transcribe(REQUESTY, self.wav, prompt="Paraşüt, OpenFrame")
+        self.assertEqual(calls[0].full_url,
+                         "https://router.requesty.ai/v1/audio/transcriptions")
+        fields = multipart_fields(calls[0])
+        self.assertEqual(fields["model"], "openai/gpt-4o-transcribe")
+        self.assertIn("prompt", fields)
+        self.assertEqual(calls[0].get_header("X-title"), "Dikte")
 
     def test_a_refused_groq_key_is_explained_in_groq_s_name(self):
         with fake_urlopen(http_error(401, '{"error": {"message": "bad key"}}')), \
@@ -332,6 +353,11 @@ class TranscribeSegments(DikteTest):
     def test_openrouter_uses_the_namespaced_id(self):
         with fake_urlopen(self.reply([{"start": 0, "end": 1, "text": "hi"}])) as calls:
             api.transcribe_segments(OPENROUTER, self.wav)
+        self.assertEqual(multipart_fields(calls[0])["model"], "openai/whisper-1")
+
+    def test_requesty_asks_for_the_namespaced_whisper(self):
+        with fake_urlopen(self.reply([{"start": 0, "end": 1, "text": "hi"}])) as calls:
+            api.transcribe_segments(REQUESTY, self.wav)
         self.assertEqual(multipart_fields(calls[0])["model"], "openai/whisper-1")
 
     def test_openrouter_asks_for_the_file_model_when_one_is_set(self):
@@ -508,6 +534,26 @@ class Cleanup(DikteTest):
                                      provider="gemini", service="Google AI Studio")
                 self.assertEqual(sent_json(calls[0])["reasoning_effort"], "high")
 
+    def test_requesty_takes_the_flat_field_rather_than_the_object(self):
+        _, calls = self.call(chat_reply("Hello."), reasoning="high",
+                             provider="requesty", service="Requesty")
+        payload = sent_json(calls[0])
+        self.assertEqual(payload["reasoning_effort"], "high")
+        self.assertNotIn("reasoning", payload)
+
+    def test_minimal_is_asked_of_requesty_as_low(self):
+        """The router refuses "minimal" outright."""
+        _, calls = self.call(chat_reply("Hello."), reasoning="minimal",
+                             provider="requesty", service="Requesty")
+        self.assertEqual(sent_json(calls[0])["reasoning_effort"], "low")
+
+    def test_requesty_left_off_or_on_its_default_is_told_nothing(self):
+        for asked in ("", "none"):
+            with self.subTest(asked=asked):
+                _, calls = self.call(chat_reply("Hello."), reasoning=asked,
+                                     provider="requesty", service="Requesty")
+                self.assertNotIn("reasoning_effort", sent_json(calls[0]))
+
     def test_gemini_left_on_the_model_s_own_default_is_told_nothing(self):
         _, calls = self.call(chat_reply("Hello."), provider="gemini",
                              service="Google AI Studio")
@@ -587,6 +633,17 @@ class Chat(DikteTest):
                          {"role": "system", "content": "you are an agent"})
         self.assertEqual(payload["messages"][1:], history +
                          [{"role": "user", "content": "move it"}])
+
+    def test_requesty_is_asked_for_an_effort_its_own_way(self):
+        with fake_urlopen(chat_reply("hi")) as calls:
+            api.chat([{"role": "user", "content": "hi"}], "k", "m", "p",
+                     reasoning="low", base_url=api.REQUESTY_URL,
+                     provider="requesty", service="Requesty")
+        payload = sent_json(calls[0])
+        self.assertEqual(calls[0].full_url,
+                         "https://router.requesty.ai/v1/chat/completions")
+        self.assertEqual(payload["reasoning_effort"], "low")
+        self.assertNotIn("reasoning", payload)
 
     def test_no_temperature_is_forced_on_a_conversation(self):
         with fake_urlopen(chat_reply("hi")) as calls:
@@ -678,6 +735,39 @@ class ModelLists(DikteTest):
         with self.assertRaises(api.ApiError) as caught:
             api.openai_models("", api.GROQ_URL, "Groq")
         self.assertIn("Groq", str(caught.exception))
+
+    def test_requesty_puts_its_managed_models_first(self):
+        catalog = {"data": [{"id": "z/model"}, {"id": "a/model"},
+                            {"id": "openai/text-embedding-3-small", "api": "embedding"}]}
+        managed = {"data": [{"id": "gpt-5.4-mini"}, {"id": "a/model"}]}
+        with fake_urlopen(catalog, managed) as calls:
+            models = api.requesty_models()
+        self.assertEqual(calls[0].full_url, "https://router.requesty.ai/v1/models")
+        self.assertEqual(calls[1].full_url,
+                         "https://router.requesty.ai/v1/models/managed")
+        self.assertIsNone(calls[0].get_header("Authorization"))
+        self.assertEqual(models, ["gpt-5.4-mini", "a/model", "z/model"])
+
+    def test_requesty_without_its_managed_list_still_has_the_catalog(self):
+        with fake_urlopen({"data": [{"id": "b/model"}, {"id": "a/model"}]},
+                          http_error(500, '{"error": {"message": "down"}}')):
+            self.assertEqual(api.requesty_models("rqsty-test"),
+                             ["a/model", "b/model"])
+
+    def test_requesty_sends_the_key_and_says_so_when_it_is_refused(self):
+        with fake_urlopen(http_error(403, '{"error": {"message": "bad key"}}')) as calls, \
+                self.assertRaises(api.ApiError) as caught:
+            api.requesty_models("rqsty-test", "https://router.eu.requesty.ai/v1")
+        self.assertEqual(calls[0].full_url, "https://router.eu.requesty.ai/v1/models")
+        self.assertEqual(calls[0].get_header("Authorization"), "Bearer rqsty-test")
+        self.assertIn("Requesty", str(caught.exception))
+
+    def test_requesty_speech_models_are_the_ones_named_for_it(self):
+        with fake_urlopen({"data": [{"id": "openai/whisper-1"},
+                                    {"id": "openai/gpt-4o-mini"}]}) as calls:
+            self.assertEqual(api.requesty_models(transcription=True),
+                             ["openai/whisper-1"])
+        self.assertEqual(len(calls), 1)
 
     def test_gemini_keeps_only_the_models_that_answer_a_chat_request(self):
         with fake_urlopen({"data": [{"id": "gemini-3.5-flash"},

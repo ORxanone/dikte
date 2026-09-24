@@ -258,6 +258,15 @@ class Home(DikteTest):
         self.window._meeting()
         self.controller._toggle_meeting.assert_not_called()
 
+    def test_the_requesty_agent_is_available_on_its_own_key(self):
+        self.conf["assistant_provider"] = "requesty"
+        self.conf["openrouter_api_key"] = "sk-or-test"
+        self.conf["requesty_api_key"] = ""
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertFalse(self.window._assistant_available())
+            self.conf["requesty_api_key"] = "rqsty-test"
+            self.assertTrue(self.window._assistant_available())
+
     def test_assistant_scope_uses_actual_shortcut_and_permissions(self):
         self.conf["assistant_provider"] = "codex"
         self.conf["assistant_shortcut"] = "Ctrl+Alt+A"

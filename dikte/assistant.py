@@ -1,16 +1,17 @@
 """Handing a dictation to an agent as a command, and pasting back its answer.
 
-Five of them, because not everyone has the same one installed:
+Six of them, because not everyone has the same one installed:
 
   Claude Code   `claude -p`, the session you would have opened yourself
   Codex         `codex exec`, the same idea from the other shop
   Antigravity   `agy -p`, Google's, with a browser of its own attached
   OpenRouter    a plain chat request, over the key that is already configured
   OpenCode Go   a plain chat request, over a subscription to open coding models
+  Requesty      a plain chat request, the same as OpenRouter's
 
 The first three are the whole machine: they run commands, read files, and reach
 whatever skills and services you have connected, which is what makes "put that
-in my calendar on Thursday" a thing you can say. The two chat requests cannot
+in my calendar on Thursday" a thing you can say. The chat requests cannot
 touch any of that, and are there so that a question still gets an answer on a
 machine with no CLI installed at all.
 
@@ -45,12 +46,13 @@ from . import paths
 from .i18n import t
 
 SESSION_FILE = cfg.DATA_DIR / "assistant.json"
-PROVIDERS = ("claude", "codex", "agy", "openrouter", "opencode")
+PROVIDERS = ("claude", "codex", "agy", "openrouter", "opencode", "requesty")
 
 # What each one is called where a person reads it: the tray, the corner of
 # the screen, and the line an error is written in.
 SERVICES = {"claude": "Claude", "codex": "Codex", "agy": "Antigravity",
-            "openrouter": "OpenRouter", "opencode": "OpenCode Go"}
+            "openrouter": "OpenRouter", "opencode": "OpenCode Go",
+            "requesty": "Requesty"}
 
 # How many messages of a chat provider's conversation are carried forward. The
 # two CLIs keep their own history and need no such number; here every turn is
@@ -161,6 +163,8 @@ def model(conf):
         return conf["assistant_openrouter_model"]
     if name == "opencode":
         return conf["assistant_opencode_model"]
+    if name == "requesty":
+        return conf["assistant_requesty_model"]
     return conf["assistant_model"]
 
 
@@ -256,7 +260,7 @@ def ask(prompt, conf, on_stage=None, should_stop=None):
     one, and only the denial explains why it did not do what it was asked to.
     """
     name = provider(conf)
-    if name in ("openrouter", "opencode"):
+    if name in ("openrouter", "opencode", "requesty"):
         return _ask_chat(name, SERVICES[name], prompt, conf, on_stage)
 
     binary = executable(name)
@@ -516,7 +520,7 @@ def agy_models():
     return ids
 
 
-# --- OpenRouter and OpenCode Go -------------------------------------------
+# --- OpenRouter, OpenCode Go and Requesty ---------------------------------
 
 def _ask_chat(name, service, prompt, conf, on_stage):
     """A plain question and answer, over a chat provider's key.
@@ -530,11 +534,10 @@ def _ask_chat(name, service, prompt, conf, on_stage):
         on_stage(t("Thinking…"))
     history = read_messages(name, conf["assistant_session_minutes"] * 60)
     messages = history + [{"role": "user", "content": prompt}]
-    model = (conf["assistant_openrouter_model"] if name == "openrouter"
-             else conf["assistant_opencode_model"])
-    base_url = (conf["openrouter_base_url"] if name == "openrouter"
-                else conf["opencode_base_url"])
-    key = conf.openrouter_key() if name == "openrouter" else conf.opencode_key()
+    # Each of them keeps its model, address and key under its own name.
+    model = conf[f"assistant_{name}_model"]
+    base_url = conf[f"{name}_base_url"]
+    key = conf.api_key(f"{name}_api_key")
     try:
         answer = api.chat(
             messages, key, model, conf.assistant_prompt(),
