@@ -219,7 +219,8 @@ def cmd_ask(opts):
         key = {"claude": "assistant_model", "codex": "assistant_codex_model",
                "openrouter": "assistant_openrouter_model",
                "agy": "assistant_agy_model",
-               "opencode": "assistant_opencode_model"}[assistant.provider(conf)]
+               "opencode": "assistant_opencode_model",
+               "requesty": "assistant_requesty_model"}[assistant.provider(conf)]
         conf[key] = opts.model
     if opts.dir:
         conf["assistant_dir"] = opts.dir
@@ -513,7 +514,7 @@ def cmd_history_clear(opts):
 # --- settings ---------------------------------------------------------------
 
 SECRET_KEYS = ("openai_api_key", "groq_api_key", "openrouter_api_key",
-               "gemini_api_key", "opencode_api_key")
+               "gemini_api_key", "opencode_api_key", "requesty_api_key")
 
 
 def _mask(key, value):
@@ -676,6 +677,9 @@ def cmd_models(opts):
         if opts.provider == "openrouter":
             models = api.openrouter_models(conf.openrouter_key(),
                                            transcription=opts.transcription)
+        elif opts.provider == "requesty":
+            models = api.requesty_models(conf.requesty_key(), conf["requesty_base_url"],
+                                         transcription=opts.transcription)
         else:
             models = api.openai_models(conf.api_key(who.key), conf[who.url],
                                        who.service)
@@ -962,6 +966,7 @@ def cmd_doctor(opts):
         "openrouter": ("OpenRouter", conf.openrouter_key()),
         "gemini": ("Google AI Studio", conf.gemini_key()),
         "opencode": ("OpenCode Go", conf.opencode_key()),
+        "requesty": ("Requesty", conf.requesty_key()),
     }.get(cleaner, ("", ""))
     if cleanup_service:
         cleanup_ready = bool(cleanup_key)
