@@ -55,6 +55,10 @@ TRANSCRIBE_MODELS = {
         "openai/whisper-large-v3-turbo", "mistralai/voxtral-mini-transcribe",
         "deepgram/nova-3", "google/chirp-3",
     ],
+    "requesty": [
+        "openai/gpt-4o-transcribe", "openai/gpt-4o-mini-transcribe",
+        "openai/whisper-1",
+    ],
 }
 CLEANUP_MODELS = [
     "google/gemini-3.5-flash-lite", "google/gemini-3.1-flash-lite",
@@ -77,7 +81,8 @@ AGY_MODELS = [
 # agent can run on open a whole session to do the smaller job.
 CLEANUP_PROVIDERS = [
     ("OpenRouter", "openrouter"), ("Google AI Studio", "gemini"),
-    ("OpenCode Go", "opencode"), ("This machine (llama.cpp)", "local"),
+    ("OpenCode Go", "opencode"), ("Requesty", "requesty"),
+    ("This machine (llama.cpp)", "local"),
     ("Claude Code", "claude"), ("Codex", "codex"), ("Antigravity", "agy"),
 ]
 # Cleaning up a sentence is the lightest thing either of them will ever be
@@ -92,6 +97,7 @@ MEETING_MODELS = [
 ASSISTANT_PROVIDERS = [
     ("Claude Code", "claude"), ("Codex", "codex"), ("Antigravity", "agy"),
     ("OpenRouter", "openrouter"), ("OpenCode Go", "opencode"),
+    ("Requesty", "requesty"),
 ]
 # Aliases resolve to the newest model of that name, so they age better than an
 # id does; a full id can be typed in when a particular one is wanted.
@@ -112,6 +118,12 @@ OPENCODE_MODELS = [
     "deepseek-v4-flash", "deepseek-v4-pro", "glm-5.3", "glm-5.2", "glm-5.1",
     "kimi-k3", "kimi-k2.7-code", "kimi-k2.6", "longcat-2.0",
     "mimo-v2.5", "mimo-v2.5-pro", "hy3",
+]
+# The same idea for Requesty, whose Fetch button puts its managed models (the
+# short names) ahead of the full vendor/model catalog.
+REQUESTY_MODELS = [
+    "google/gemini-3.5-flash-lite", "google/gemini-3.5-flash",
+    "openai/gpt-4o-mini", "gpt-5.4-mini", "deepseek-v4-flash",
 ]
 # What Claude Code may do without being able to ask. It cannot ask: there is no
 # window to answer in, so a mode that would have prompted denies instead.
@@ -901,6 +913,7 @@ class SettingsWindow(QDialog):
     _models_loaded = pyqtSignal(list, str)
     _gemini_models_loaded = pyqtSignal(list, str)
     _opencode_models_loaded = pyqtSignal(list, str)
+    _requesty_models_loaded = pyqtSignal(list, str)
     _transcribe_models_loaded = pyqtSignal(list, str)
     _codex_models_loaded = pyqtSignal(list)
     _agy_models_loaded = pyqtSignal(list)
@@ -992,6 +1005,7 @@ class SettingsWindow(QDialog):
         self._transcribe_models_loaded.connect(self._on_transcribe_models_loaded)
         self._codex_models_loaded.connect(self._on_codex_models_loaded)
         self._opencode_models_loaded.connect(self._on_opencode_models_loaded)
+        self._requesty_models_loaded.connect(self._on_requesty_models_loaded)
         self._agy_models_loaded.connect(self._on_agy_models_loaded)
         self._hosted_models_loaded.connect(self._on_hosted_models_loaded)
         self._test_done.connect(self._on_test_done)
@@ -1347,6 +1361,9 @@ class SettingsWindow(QDialog):
         self.opencode_key = self._key_row(
             keys_form, "opencode", t("(falls back to OPENCODE_API_KEY)"),
             self._test_opencode, service="OpenCode Go")
+        self.requesty_key = self._key_row(
+            keys_form, "requesty", t("(falls back to REQUESTY_API_KEY)"),
+            self._test_requesty)
         outer.addWidget(keys)
 
         stt = QGroupBox(t("Speech to text"))
@@ -1482,6 +1499,16 @@ class SettingsWindow(QDialog):
         self.cleanup_opencode_model_row = self._row(self.cleanup_opencode_model,
                                                     self.refresh_opencode_models)
         orr_form.addRow(t("Model"), self.cleanup_opencode_model_row)
+
+        self.cleanup_requesty_model = QComboBox()
+        self.cleanup_requesty_model.setEditable(True)
+        self.cleanup_requesty_model.addItems(REQUESTY_MODELS)
+        self.cleanup_requesty_model.setToolTip(_typed_model_note("Requesty"))
+        self.refresh_requesty_models = QPushButton(t("Fetch model list"))
+        self.refresh_requesty_models.clicked.connect(self._load_requesty_models)
+        self.cleanup_requesty_model_row = self._row(self.cleanup_requesty_model,
+                                                    self.refresh_requesty_models)
+        orr_form.addRow(t("Model"), self.cleanup_requesty_model_row)
 
         self.cleanup_agy_model = QComboBox()
         self.cleanup_agy_model.setEditable(True)
@@ -1761,6 +1788,25 @@ class SettingsWindow(QDialog):
         og_note.setWordWrap(True)
         og_form.addRow(og_note)
         layout.addWidget(self.opencode_box)
+
+        self.requesty_box = QGroupBox("Requesty")
+        rq_form = QFormLayout(self.requesty_box)
+        rq_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self.assistant_requesty_model = QComboBox()
+        self.assistant_requesty_model.setEditable(True)
+        self.assistant_requesty_model.addItems(REQUESTY_MODELS)
+        rq_form.addRow(t("Model"), self.assistant_requesty_model)
+        rq_note = QLabel(t(
+            "A plain question and a plain answer, over the Requesty key you "
+            "already have. It runs no commands, opens no files and reaches none "
+            "of your services, so it can tell you what the capital of Peru is "
+            "but not what is in your calendar. Working directory and permissions "
+            "above mean nothing here."
+        ))
+        rq_note.setWordWrap(True)
+        rq_form.addRow(rq_note)
+        layout.addWidget(self.requesty_box)
 
         thread = QGroupBox(t("The conversation"))
         thread_form = QFormLayout(thread)
@@ -2349,6 +2395,7 @@ class SettingsWindow(QDialog):
             conf["cleanup_agy_model"] or t("Antigravity's own default")
         )
         self.cleanup_opencode_model.setCurrentText(conf["cleanup_opencode_model"])
+        self.cleanup_requesty_model.setCurrentText(conf["cleanup_requesty_model"])
         self._select_data(self.cleanup_provider, conf["cleanup_provider"])
         self._cleanup_provider_changed()  # selecting index 0 fires no signal
         self._select_data(self.cleanup_reasoning, conf["cleanup_reasoning"])
@@ -2384,6 +2431,7 @@ class SettingsWindow(QDialog):
         self.assistant_openrouter_model.setCurrentText(conf["assistant_openrouter_model"])
         self.assistant_agy_model.setCurrentText(conf["assistant_agy_model"])
         self.assistant_opencode_model.setCurrentText(conf["assistant_opencode_model"])
+        self.assistant_requesty_model.setCurrentText(conf["assistant_requesty_model"])
         self._assistant_provider_changed()  # selecting index 0 fires no signal
         self._select_data(self.assistant_reasoning, conf["assistant_reasoning"])
         self.assistant_dir.setText(conf["assistant_dir"])
@@ -2489,6 +2537,10 @@ class SettingsWindow(QDialog):
             self.cleanup_opencode_model.currentText().strip()
             or cfg.DEFAULTS["cleanup_opencode_model"]
         )
+        conf["cleanup_requesty_model"] = (
+            self.cleanup_requesty_model.currentText().strip()
+            or cfg.DEFAULTS["cleanup_requesty_model"]
+        )
         conf["cleanup_reasoning"] = self.cleanup_reasoning.currentData() or ""
         conf["local_llm_model"] = self.local_llm.selected()
         conf["local_llm_repo"] = self.local_llm.repository()
@@ -2536,6 +2588,10 @@ class SettingsWindow(QDialog):
         conf["assistant_opencode_model"] = (
             self.assistant_opencode_model.currentText().strip()
             or cfg.DEFAULTS["assistant_opencode_model"]
+        )
+        conf["assistant_requesty_model"] = (
+            self.assistant_requesty_model.currentText().strip()
+            or cfg.DEFAULTS["assistant_requesty_model"]
         )
         conf["assistant_reasoning"] = self.assistant_reasoning.currentData() or ""
         conf["assistant_dir"] = self.assistant_dir.text().strip()
@@ -2650,6 +2706,9 @@ class SettingsWindow(QDialog):
         local = provider == "local"
         self.stt_form.setRowVisible(self.transcribe_model_row, not local)
         self.stt_form.setRowVisible(self.file_model_row, provider == "openrouter")
+        # Requesty transcribes with models it does not list, so there is
+        # nothing for the button to fetch.
+        self.refresh_transcribe_models.setVisible(provider != "requesty")
         self.stt_form.setRowVisible(self.transcribe_status, not local)
         self.stt_form.setRowVisible(self.local_whisper, local)
         self.stt_form.setRowVisible(self.local_options, local)
@@ -2809,6 +2868,35 @@ class SettingsWindow(QDialog):
             combo.addItems(models)
             combo.setCurrentText(current)
 
+    def _load_requesty_models(self):
+        self.refresh_requesty_models.setEnabled(False)
+        self.models_label.setText(t("Fetching model list…"))
+        key, base = self._typed_key("requesty")
+
+        def work():
+            try:
+                self._requesty_models_loaded.emit(api.requesty_models(key, base), "")
+            except api.ApiError as exc:
+                self._requesty_models_loaded.emit([], str(exc))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_requesty_models_loaded(self, models, error):
+        self.refresh_requesty_models.setEnabled(True)
+        if error:
+            self.models_label.setText(t("Could not fetch the list: {error}", error=error))
+            return
+        self._fill_requesty_boxes(models)
+        self.models_label.setText(t("{count} models loaded.", count=len(models)))
+
+    def _fill_requesty_boxes(self, models):
+        # The same arrangement as OpenCode Go: one key, one catalog, two boxes.
+        for combo in (self.cleanup_requesty_model, self.assistant_requesty_model):
+            current = combo.currentText()
+            combo.clear()
+            combo.addItems(models)
+            combo.setCurrentText(current)
+
     def _load_agy_models(self):
         """Ask Antigravity which models it offers, off the interface thread.
 
@@ -2861,6 +2949,11 @@ class SettingsWindow(QDialog):
             jobs.append(("opencode",
                          lambda: api.openai_models(opencode_key, opencode_base,
                                                    "OpenCode Go")))
+        requesty_key = self.conf.requesty_key()
+        requesty_base = self.conf["requesty_base_url"]
+        if requesty_key:
+            jobs.append(("requesty",
+                         lambda: api.requesty_models(requesty_key, requesty_base)))
         for provider, fetch in jobs:
             def work(provider=provider, fetch=fetch):
                 try:
@@ -2875,6 +2968,9 @@ class SettingsWindow(QDialog):
     def _on_hosted_models_loaded(self, provider, models):
         if provider == "opencode":
             self._fill_opencode_boxes(models)
+            return
+        if provider == "requesty":
+            self._fill_requesty_boxes(models)
             return
         combos = ((self.cleanup_model, self.meeting_model)
                   if provider == "openrouter" else (self.cleanup_gemini_model,))
@@ -2914,6 +3010,13 @@ class SettingsWindow(QDialog):
         self._test_key("opencode", lambda: t(
             "Connection works. {count} models visible.",
             count=len(api.openai_models(key, base, "OpenCode Go")),
+        ))
+
+    def _test_requesty(self):
+        key, base = self._typed_key("requesty")
+        self._test_key("requesty", lambda: t(
+            "Connection works. {count} models visible.",
+            count=len(api.openai_models(key, base, "Requesty")),
         ))
 
     def _typed_key(self, provider):
@@ -3157,6 +3260,8 @@ class SettingsWindow(QDialog):
                                         provider == "codex")
         self.cleanup_form.setRowVisible(self.cleanup_opencode_model_row,
                                         provider == "opencode")
+        self.cleanup_form.setRowVisible(self.cleanup_requesty_model_row,
+                                        provider == "requesty")
         self.cleanup_form.setRowVisible(self.cleanup_agy_model,
                                         provider == "agy")
         self.cleanup_form.setRowVisible(self.cleanup_reasoning,
@@ -3173,6 +3278,8 @@ class SettingsWindow(QDialog):
             self.models_label.setText(t("Runs on Google AI Studio."))
         elif provider == "opencode":
             self.models_label.setText(t("Runs on OpenCode Go."))
+        elif provider == "requesty":
+            self.models_label.setText(t("Runs on Requesty."))
         elif not binary:
             self.models_label.setText(t("Runs on OpenRouter."))
         elif found:
@@ -3191,6 +3298,7 @@ class SettingsWindow(QDialog):
         self.openrouter_box.setVisible(provider == "openrouter")
         self.agy_box.setVisible(provider == "agy")
         self.opencode_box.setVisible(provider == "opencode")
+        self.requesty_box.setVisible(provider == "requesty")
         self._refresh_assistant_status()
 
     def _refresh_assistant_status(self):
@@ -3201,6 +3309,10 @@ class SettingsWindow(QDialog):
             if provider == "opencode":
                 self.assistant_found.setText(
                     t("Needs no program installed, only an OpenCode Go key.")
+                )
+            elif provider == "requesty":
+                self.assistant_found.setText(
+                    t("Needs no program installed, only a Requesty key.")
                 )
             else:
                 self.assistant_found.setText(
