@@ -58,6 +58,7 @@ CHANGED = {
     "silence_db": -42.0,
     "filter_hallucinations": False,
     "keep_audio": True,
+    "start_in_tray": False,
     "openai_api_key": "sk-test-key",
     "groq_api_key": "gsk-test-key",
     "openrouter_api_key": "sk-or-test-key",

@@ -144,7 +144,7 @@ cat > "$AUTOSTART_DIR/dikte.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Dikte
-Exec=$PY $ENTRY
+Exec=$PY $ENTRY --autostart
 Icon=$ICON
 X-GNOME-Autostart-enabled=true
 StartupNotify=false

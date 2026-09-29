@@ -219,10 +219,11 @@ def ensure():
     to do, so that the cost of being started from a new location is one run
     with the wrong shortcuts rather than a reinstall.
     """
-    if not packaged():
-        return []
     try:
-        return install()
+        changed = install() if packaged() else []
+        if sys.platform not in ("darwin", "win32"):
+            changed += _flag_login_entry()
+        return changed
     except OSError:
         # A read-only home, a full disk, a $HOME that is not ours. None of it
         # is a reason to refuse to start: Dikte works without a menu entry.
@@ -368,7 +369,10 @@ def _linux_install(appimage, force=False):
     command = _exec_field(str(appimage))
     if _write(paths["menu"], _desktop_entry(command)):
         written.append(paths["menu"])
-    if _write(paths["autostart"], _desktop_entry(command, autostart=True)):
+    # --autostart is what tells a login start from a click on the menu entry,
+    # and so what lets the setting keep the window closed at login.
+    login = f"{command} --autostart"
+    if _write(paths["autostart"], _desktop_entry(login, autostart=True)):
         written.append(paths["autostart"])
     if _icon(paths["icons"]):
         written.append(paths["icons"] / "hicolor")
@@ -386,6 +390,33 @@ def _linux_install(appimage, force=False):
             link.symlink_to(appimage)
             written.append(link)
     return written
+
+
+def _flag_login_entry():
+    """Add --autostart to a login entry of ours written before it existed.
+
+    install.sh writes that entry for a checkout, and _linux_install stands
+    aside when AppImageLauncher owns the menu, so neither is rewritten above.
+    Without the flag a login start is a menu click and opens the window
+    whatever the settings say. Only an entry that starts this installation is
+    touched: another Dikte's is its own business.
+    """
+    path = _paths()["autostart"]
+    if not path.is_file():
+        return []
+    entry = path.read_text(encoding="utf-8")
+    words = _exec_targets(entry)
+    if not words or "--autostart" in words:
+        return []
+    ours = {os.path.realpath(pathlib.Path(__file__).with_name("__main__.py"))}
+    if packaged():
+        ours.add(os.path.realpath(target()))
+    if not any(os.path.realpath(word) in ours for word in words):
+        return []
+    lines = [line + " --autostart" if line.startswith("Exec=") else line
+             for line in entry.splitlines()]
+    _write(path, "\n".join(lines) + "\n")
+    return [path]
 
 
 def _linux_remove():
@@ -457,7 +488,8 @@ def _agent_plist(app):
     granted to Dikte rather than to launchd."""
     return plistlib.dumps({
         "Label": AGENT_ID,
-        "ProgramArguments": ["/usr/bin/open", "-a", str(app)],
+        "ProgramArguments": ["/usr/bin/open", "-a", str(app),
+                             "--args", "--autostart"],
         "RunAtLoad": True,
         # Off on purpose: quitting from the menu bar should quit it, not
         # hand it back to launchd to start again.
@@ -616,7 +648,7 @@ def _windows_install(app, force=False):
     menu entry; somebody who unticked the box in the wizard, or turned it off
     since, is not asked again by every start either.
     """
-    command = f'"{app}"'
+    command = f'"{app}" --autostart'
     current = _run_entry()
     changed = []
     if force:

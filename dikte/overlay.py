@@ -73,6 +73,14 @@ def _compositor_screen():
                 None)
 
 
+def active_screen():
+    """The screen being worked on: KWin's answer, else the pointer's, else
+    the primary one. What a window opened from the tray should come up on."""
+    return (_compositor_screen()
+            or QApplication.screenAt(QCursor.pos())
+            or QApplication.primaryScreen())
+
+
 class Overlay(QWidget):
     """One indicator. Give it `below` and it stacks on top of that one instead
     of covering it, which is what lets a dictation and a command to the agent be
@@ -316,9 +324,7 @@ class Overlay(QWidget):
             (item for item in QApplication.screens() if item.name() == self.screen_name),
             None,
         )
-        return (named or _compositor_screen()
-                or QApplication.screenAt(QCursor.pos())
-                or QApplication.primaryScreen())
+        return named or active_screen()
 
     def _wandered_off(self):
         """Whether the pointer has left the screen the indicator is on.

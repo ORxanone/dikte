@@ -219,6 +219,47 @@ class Certificates(unittest.TestCase):
 
 
 @posix_only
+class CheckoutLoginEntry(Home):
+    """install.sh's login entry, from before --autostart, brought up to date."""
+
+    def setUp(self):
+        super().setUp()
+        self.script = pathlib.Path(integrate.__file__).with_name("__main__.py")
+        self.environment = mock.patch.dict(os.environ, {
+            "HOME": str(self.home),
+            "XDG_CONFIG_HOME": str(self.home / ".config"),
+            "XDG_DATA_HOME": str(self.home / ".local/share"),
+        })
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+        self.platform = mock.patch.object(sys, "platform", "linux")
+        self.platform.start()
+        self.addCleanup(self.platform.stop)
+
+    def login_entry(self, exec_line):
+        self.autostart.mkdir(parents=True, exist_ok=True)
+        path = self.autostart / "dikte.desktop"
+        path.write_text(f"[Desktop Entry]\nType=Application\nName=Dikte\n"
+                        f"Exec={exec_line}\nIcon=dikte\n", encoding="utf-8")
+        return path
+
+    def test_an_entry_for_this_checkout_is_given_the_flag(self):
+        path = self.login_entry(f"/usr/bin/python3 {self.script}")
+        self.assertEqual(integrate.ensure(), [path])
+        self.assertIn(f"Exec=/usr/bin/python3 {self.script} --autostart\n",
+                      path.read_text(encoding="utf-8"))
+        self.assertEqual(integrate.ensure(), [])
+
+    def test_another_installations_entry_is_left_alone(self):
+        path = self.login_entry("/usr/bin/python3 /elsewhere/dikte/__main__.py")
+        self.assertEqual(integrate.ensure(), [])
+        self.assertNotIn("--autostart", path.read_text(encoding="utf-8"))
+
+    def test_no_entry_is_no_entry(self):
+        self.assertEqual(integrate.ensure(), [])
+        self.assertFalse((self.autostart / "dikte.desktop").exists())
+
+
 class Linux(Home):
     def install(self, appimage, force=False):
         with Frozen("/tmp/.mount_x/usr/bin/dikte", appimage=str(appimage),
@@ -235,7 +276,8 @@ class Linux(Home):
         self.assertIn(f"Exec={appimage}", menu)
         self.assertIn("Categories=", menu)
         autostart = (self.autostart / "dikte.desktop").read_text(encoding="utf-8")
-        self.assertIn(f"Exec={appimage}", autostart)
+        self.assertIn(f"Exec={appimage} --autostart\n", autostart)
+        self.assertNotIn("--autostart", menu)
         self.assertNotIn("Categories=", autostart)
         self.assertEqual(os.readlink(self.home / ".local/bin/dikte"), str(appimage))
 
@@ -382,6 +424,7 @@ class MacOS(Home):
         # LaunchServices started and the permissions are the bundle's.
         self.assertEqual(plist["ProgramArguments"][:2], ["/usr/bin/open", "-a"])
         self.assertEqual(plist["ProgramArguments"][2], str(app))
+        self.assertEqual(plist["ProgramArguments"][3:], ["--args", "--autostart"])
         self.assertFalse(plist["KeepAlive"])
 
         command = self.home / ".local/bin/dikte"
@@ -514,12 +557,12 @@ class Windows(unittest.TestCase):
 
     def test_typing_it_turns_starting_at_sign_in_on(self):
         self.assertEqual(len(self.install(force=True)), 1)
-        self.assertEqual(self.value, f'"{self.app}"')
+        self.assertEqual(self.value, f'"{self.app}" --autostart')
 
     def test_an_installation_that_moved_is_pointed_at_where_it_is_now(self):
         self.value = '"D:\\Dikte\\Dikte.exe"'
         self.assertEqual(len(self.install()), 1)
-        self.assertEqual(self.value, f'"{self.app}"')
+        self.assertEqual(self.value, f'"{self.app}" --autostart')
 
     def test_an_entry_for_another_working_install_is_left_alone(self):
         """The same courtesy the Linux half pays another menu entry: an entry
@@ -538,7 +581,7 @@ class Windows(unittest.TestCase):
         other.write_text("")
         self.value = f'"{other}"'
         self.assertEqual(self.install(force=True), [integrate._run_entry_name()])
-        self.assertEqual(self.value, f'"{self.app}"')
+        self.assertEqual(self.value, f'"{self.app}" --autostart')
 
     def test_typing_it_sweeps_away_a_checkout_startup_shortcut(self):
         """install.ps1 -Autostart writes it, the Run value replaces it, and
@@ -556,9 +599,16 @@ class Windows(unittest.TestCase):
         shortcut = self.startup_shortcut()
         shortcut.parent.mkdir(parents=True)
         shortcut.write_text("")
-        self.value = f'"{self.app}"'
+        self.value = f'"{self.app}" --autostart'
         self.assertEqual(self.install(), [])
         self.assertTrue(shortcut.exists())
+
+    def test_an_entry_from_before_the_flag_is_given_it(self):
+        """Without --autostart a sign-in start is a menu click and opens the
+        window, so an entry an older setup wrote is brought up to date."""
+        self.value = f'"{self.app}"'
+        self.assertEqual(self.install(), [integrate._run_entry_name()])
+        self.assertEqual(self.value, f'"{self.app}" --autostart')
 
     def test_running_it_again_changes_nothing(self):
         self.install(force=True)
