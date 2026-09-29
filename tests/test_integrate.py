@@ -260,6 +260,7 @@ class CheckoutLoginEntry(Home):
         self.assertFalse((self.autostart / "dikte.desktop").exists())
 
 
+@posix_only
 class Linux(Home):
     def install(self, appimage, force=False):
         with Frozen("/tmp/.mount_x/usr/bin/dikte", appimage=str(appimage),
