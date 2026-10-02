@@ -404,7 +404,11 @@ def _flag_login_entry():
     path = _paths()["autostart"]
     if not path.is_file():
         return []
-    entry = path.read_text(encoding="utf-8")
+    try:
+        entry = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        # An unreadable entry cannot be identified as belonging to us.
+        return []
     words = _exec_targets(entry)
     if not words or "--autostart" in words:
         return []

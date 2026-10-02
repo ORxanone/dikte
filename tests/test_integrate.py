@@ -255,6 +255,20 @@ class CheckoutLoginEntry(Home):
         self.assertEqual(integrate.ensure(), [])
         self.assertNotIn("--autostart", path.read_text(encoding="utf-8"))
 
+    def test_an_invalid_utf8_login_entry_does_not_block_startup(self):
+        path = self.login_entry("/usr/bin/python3 /elsewhere/dikte/__main__.py")
+        original = path.read_bytes() + b"\xff"
+        path.write_bytes(original)
+        self.assertEqual(integrate.ensure(), [])
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_an_unreadable_login_entry_is_left_alone(self):
+        path = self.login_entry(f"/usr/bin/python3 {self.script}")
+        original = path.read_bytes()
+        with mock.patch.object(pathlib.Path, "read_text", side_effect=PermissionError):
+            self.assertEqual(integrate._flag_login_entry(), [])
+        self.assertEqual(path.read_bytes(), original)
+
     def test_no_entry_is_no_entry(self):
         self.assertEqual(integrate.ensure(), [])
         self.assertFalse((self.autostart / "dikte.desktop").exists())
