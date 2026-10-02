@@ -547,12 +547,16 @@ class Cleanup(DikteTest):
                              provider="requesty", service="Requesty")
         self.assertEqual(sent_json(calls[0])["reasoning_effort"], "low")
 
-    def test_requesty_left_off_or_on_its_default_is_told_nothing(self):
+    def test_requesty_off_is_distinct_from_the_model_default(self):
         for asked in ("", "none"):
             with self.subTest(asked=asked):
                 _, calls = self.call(chat_reply("Hello."), reasoning=asked,
                                      provider="requesty", service="Requesty")
-                self.assertNotIn("reasoning_effort", sent_json(calls[0]))
+                payload = sent_json(calls[0])
+                if asked:
+                    self.assertEqual(payload["reasoning_effort"], "none")
+                else:
+                    self.assertNotIn("reasoning_effort", payload)
 
     def test_gemini_left_on_the_model_s_own_default_is_told_nothing(self):
         _, calls = self.call(chat_reply("Hello."), provider="gemini",
@@ -645,6 +649,17 @@ class Chat(DikteTest):
         self.assertEqual(payload["reasoning_effort"], "low")
         self.assertNotIn("reasoning", payload)
 
+    def test_requesty_chat_preserves_explicit_off_and_default(self):
+        for effort in ("", "none"):
+            with self.subTest(effort=effort), fake_urlopen(chat_reply("hi")) as calls:
+                api.chat([{"role": "user", "content": "hi"}], "k", "m", "p",
+                         reasoning=effort, provider="requesty", service="Requesty")
+                payload = sent_json(calls[0])
+                if effort:
+                    self.assertEqual(payload["reasoning_effort"], "none")
+                else:
+                    self.assertNotIn("reasoning_effort", payload)
+
     def test_no_temperature_is_forced_on_a_conversation(self):
         with fake_urlopen(chat_reply("hi")) as calls:
             api.chat([{"role": "user", "content": "hi"}], "k", "m", "p")
@@ -735,6 +750,16 @@ class ModelLists(DikteTest):
         with self.assertRaises(api.ApiError) as caught:
             api.openai_models("", api.GROQ_URL, "Groq")
         self.assertIn("Groq", str(caught.exception))
+
+    def test_malformed_catalogs_raise_the_recoverable_api_error(self):
+        for payload in ({"data": None}, {"data": ["oops"]}, {"data": [{"id": {}}]}, []):
+            for provider in ("requesty", "deepseek"):
+                with self.subTest(payload=payload, provider=provider), fake_urlopen(payload):
+                    with self.assertRaises(api.ApiError):
+                        if provider == "requesty":
+                            api.requesty_models("synthetic")
+                        else:
+                            api.openai_models("synthetic", "https://example.invalid", "DeepSeek")
 
     def test_requesty_puts_its_managed_models_first(self):
         catalog = {"data": [{"id": "z/model"}, {"id": "a/model"},

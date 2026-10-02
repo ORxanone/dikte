@@ -683,10 +683,8 @@ def _thinking(payload, provider, reasoning):
         # this provider was chosen to save.
         payload["reasoning_effort"] = GEMINI_EFFORT.get(reasoning, reasoning)
     elif provider == "requesty":
-        # "none" is left unsent, as it is for OpenRouter: not every model
-        # behind it takes the word.
-        if reasoning != "none":
-            payload["reasoning_effort"] = REQUESTY_EFFORT.get(reasoning, reasoning)
+        # Explicit Off must remain distinct from the model's default.
+        payload["reasoning_effort"] = REQUESTY_EFFORT.get(reasoning, reasoning)
     elif reasoning != "none":
         # The thinking itself is never shown, so ask for it to be left out.
         payload["reasoning"] = {"effort": reasoning, "exclude": True}
@@ -894,6 +892,17 @@ def openrouter_models(api_key="", transcription=False):
     return sorted(m["id"] for m in models if m.get("id"))
 
 
+def _model_catalog(payload):
+    """Reject malformed remote catalogs with the error the UI can recover from."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("data", []), list):
+        raise ApiError(t("The provider returned an invalid model catalog."))
+    rows = payload.get("data", [])
+    if any(not isinstance(row, dict)
+           or not isinstance(row.get("id", ""), str) for row in rows):
+        raise ApiError(t("The provider returned an invalid model catalog."))
+    return rows
+
+
 def requesty_models(api_key="", base_url=REQUESTY_URL, transcription=False):
     """Model ids available on Requesty (no key required).
 
@@ -909,14 +918,14 @@ def requesty_models(api_key="", base_url=REQUESTY_URL, transcription=False):
         headers["Authorization"] = f"Bearer {api_key}"
     base = base_url.rstrip("/")
     try:
-        catalog = _get_json(f"{base}/models", headers).get("data", [])
+        catalog = _model_catalog(_get_json(f"{base}/models", headers))
     except ApiError as exc:
         raise explain(exc, "Requesty") from None
     if transcription:
         return sorted(m["id"] for m in catalog if m.get("id")
                       and ("transcribe" in m["id"] or "whisper" in m["id"]))
     try:
-        managed = _get_json(f"{base}/models/managed", headers).get("data", [])
+        managed = _model_catalog(_get_json(f"{base}/models/managed", headers))
     except ApiError:
         # The catalog alone is still a list worth having.
         managed = []
@@ -975,6 +984,6 @@ def openai_models(api_key, base_url=OPENAI_URL, service="OpenAI"):
         )
     except ApiError as exc:
         raise explain(exc, service) from None
-    ids = [m["id"] for m in data.get("data", []) if m.get("id")]
+    ids = [m["id"] for m in _model_catalog(data) if m.get("id")]
     audio = [i for i in ids if "transcribe" in i or "whisper" in i]
     return sorted(audio or ids)

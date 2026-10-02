@@ -1092,4 +1092,6 @@ TR = {
     "The recording stopped on its own; transcribing what was captured.":
         "Kayıt kendi kendine durdu; yakalanan kısım yazıya dökülüyor.",
     "Could not save the settings: {error}": "Ayarlar kaydedilemedi: {error}",
+    "The provider returned an invalid model catalog.": "Sağlayıcı geçersiz bir model listesi döndürdü.",
+
 }
