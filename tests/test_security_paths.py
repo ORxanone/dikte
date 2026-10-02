@@ -10,6 +10,7 @@ import unittest
 ROOT = Path(__file__).resolve().parent.parent
 
 
+@unittest.skipUnless(os.name == 'posix', 'macOS shell wrappers require POSIX paths')
 class ShellWrappers(unittest.TestCase):
     def test_generated_command_treats_paths_and_arguments_as_data(self):
         installer = (ROOT / 'scripts/install-mac.sh').read_text()
