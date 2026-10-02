@@ -186,6 +186,14 @@ class Settings(DikteTest):
                            Qt.KeyboardModifier.NoModifier,
                            Qt.ScrollPhase.NoScrollPhase, False)
 
+    def test_settings_is_not_tied_to_the_home_windows_desktop(self):
+        """A parentless dialog is transient for the whole application under
+        X11, and KWin then pulls the user to the home window's desktop."""
+        window = self.window(cfg.Config())
+        expected = (Qt.WindowType.Dialog if self.platform in ("darwin", "win32")
+                    else Qt.WindowType.Window)
+        self.assertEqual(window.windowType(), expected)
+
     def test_settings_keeps_configuration_and_exposes_separate_task_pages(self):
         window = self.window(cfg.Config())
         tabs = window.findChildren(settings_ui.QTabWidget)[0]

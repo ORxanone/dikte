@@ -928,6 +928,15 @@ class SettingsWindow(QDialog):
 
     def __init__(self, conf, meetings=None, parent=None):
         super().__init__(parent)
+        if parent is None and sys.platform not in ("darwin", "win32"):
+            # Under X11 a dialog without a parent is marked transient for the
+            # whole application, and KWin keeps such a window on the virtual
+            # desktop of the home window. Opening Settings from another
+            # desktop then switched the user back there. A plain top-level
+            # window is placed on its own, like the home window.
+            self.setWindowFlags(
+                (self.windowFlags() & ~Qt.WindowType.WindowType_Mask)
+                | Qt.WindowType.Window)
         self.conf = conf
         self.meetings = meetings
         # Filled in by _shortcut_row as the tabs are built: which combination
