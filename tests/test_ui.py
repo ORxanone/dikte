@@ -62,6 +62,7 @@ CHANGED = {
     "groq_api_key": "gsk-test-key",
     "openrouter_api_key": "sk-or-test-key",
     "gemini_api_key": "AIza-test-key",
+    "deepseek_api_key": "sk-deepseek-test-key",
     "requesty_api_key": "rqsty-test-key",
     "transcribe_provider": "openrouter",
     "transcribe_model": "whisper-1",
@@ -74,6 +75,7 @@ CHANGED = {
     "cleanup_claude_model": "opus",
     "cleanup_codex_model": "gpt-5",
     "cleanup_gemini_model": "gemini-2.5-flash",
+    "cleanup_deepseek_model": "deepseek-v4-pro",
     "cleanup_agy_model": "gemini-3.1-pro-low",
     "cleanup_requesty_model": "gpt-5.4-mini",
     "cleanup_reasoning": "high",
@@ -368,6 +370,7 @@ class Settings(DikteTest):
                  "opencode": window.cleanup_opencode_model_row,
                  "requesty": window.cleanup_requesty_model_row,
                  "claude": window.cleanup_claude_model,
+                 "deepseek": window.cleanup_deepseek_model_row,
                  "codex": window.cleanup_codex_model}
         for provider, box in boxes.items():
             with self.subTest(provider=provider):
@@ -399,6 +402,7 @@ class Settings(DikteTest):
             window.file_model,
             window.cleanup_model,
             window.cleanup_gemini_model,
+            window.cleanup_deepseek_model,
             window.cleanup_opencode_model,
             window.cleanup_requesty_model,
             window.cleanup_agy_model,
@@ -550,11 +554,12 @@ class Settings(DikteTest):
     def test_a_key_on_file_is_fetched_with_at_open(self):
         window = self.window(self.config(openrouter_api_key="sk-or-x",
                                          gemini_api_key="AIza-x",
+                                         deepseek_api_key="sk-deepseek-x",
                                          opencode_api_key="opencode-x",
                                          requesty_api_key="rqsty-x"))
         with mock.patch.object(settings_ui.threading, "Thread") as thread:
             REAL_LOAD_HOSTED_MODELS(window)
-        self.assertEqual(thread.call_count, 4)
+        self.assertEqual(thread.call_count, 5)
 
     def test_the_update_line_names_the_version_that_is_running(self):
         window = self.window(cfg.Config())
@@ -1174,23 +1179,19 @@ class Overlay(DikteTest):
         self.assertTrue(flags & Qt.WindowType.WindowStaysOnTopHint)
 
     def test_it_lets_a_click_through_to_whatever_is_under_it(self):
-        """It stays mapped while idle, so without this its corner of the screen
-        would stop taking clicks for good. The widget attribute is not enough:
-        on a top-level window it only makes Qt drop the event it already took."""
+        """A visible indicator must not intercept clicks beneath it."""
         from PyQt6.QtCore import Qt
         flags = self.overlay().windowFlags()
         self.assertTrue(flags & Qt.WindowType.WindowTransparentForInput)
 
-    def test_the_one_that_takes_clicks_shrinks_out_of_the_way(self):
-        """It has to stay clickable, so it cannot be transparent to input; it
-        gets out of the way by leaving nothing there to click instead."""
+    def test_the_one_that_takes_clicks_unmaps_when_dismissed(self):
         widget = self.overlay(dismissable=True)
         widget.show_busy("Asking Claude…")
-        self.assertGreater(widget.width(), 1)
+        self.assertTrue(widget.isVisible())
         widget.dismiss()
-        self.assertEqual((widget.width(), widget.height()), (1, 1))
+        self.assertFalse(widget.isVisible())
         widget.show_busy("Asking Claude…")
-        self.assertGreater(widget.width(), 1)
+        self.assertTrue(widget.isVisible())
 
     def test_recording_then_working_then_done(self):
         widget = self.overlay()
@@ -1202,6 +1203,7 @@ class Overlay(DikteTest):
         widget.show_done("Pasted")
         widget._conceal()
         self.assertFalse(widget.showing)
+        self.assertFalse(widget.isVisible())
 
     def test_a_held_recording_says_so_and_stops_moving(self):
         """Everything about the ribbon says a recording is running; a pause the
@@ -2013,6 +2015,7 @@ class LocalModels(DikteTest):
         window = self.window(cfg.Config())
         rows = {"openrouter": window.cleanup_model_row,
                 "gemini": window.cleanup_gemini_model_row,
+                "deepseek": window.cleanup_deepseek_model_row,
                 "claude": window.cleanup_claude_model,
                 "codex": window.cleanup_codex_model,
                 "agy": window.cleanup_agy_model}

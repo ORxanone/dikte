@@ -256,8 +256,24 @@ def explain(exc, service):
     return ApiError(f"{service}: {exc}", exc.status, retryable=exc.retryable)
 
 
+def _authenticated_request(url, data=None, headers=None, method=None):
+    """Send credentials only to the explicitly configured endpoint.
+
+    urllib copies ordinary headers to redirected requests, including across
+    hosts and HTTPS downgrades. Unredirected headers reach the first endpoint
+    only, in both the normal and cancellable request paths.
+    """
+    request = urllib.request.Request(url, data=data, method=method)
+    for name, value in (headers or {}).items():
+        if name.lower() == "authorization":
+            request.add_unredirected_header(name, value)
+        else:
+            request.add_header(name, value)
+    return request
+
+
 def _request(url, data, headers, timeout=120, aborter=None):
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    req = _authenticated_request(url, data=data, headers=headers, method="POST")
     try:
         with _opened(req, timeout, aborter) as resp:
             return json.loads(resp.read().decode("utf-8"))
@@ -663,11 +679,10 @@ def _thinking(payload, provider, reasoning):
     """Ask for as much thinking as this provider understands, or for none.
 
     An empty level means "whatever the model does on its own", so nothing is
-    sent. The three mean opposite things by that, which is why the setting is
-    kept per provider: OpenRouter's cleanup models answer straight away, while a
-    local model that was trained to think will think, and a Gemini Flash left to
-    itself thinks too. Cleanup is punctuation rather than a job worth thinking
-    about.
+    sent. Providers mean different things by that: OpenRouter's cleanup models
+    answer straight away, while a local model trained to think, Gemini Flash,
+    and DeepSeek think by default. Cleanup is punctuation rather than a job
+    worth thinking about.
     """
     if not reasoning:
         return
@@ -682,6 +697,14 @@ def _thinking(payload, provider, reasoning):
         # to decide for itself thinks, and thinking about a comma is the second
         # this provider was chosen to save.
         payload["reasoning_effort"] = GEMINI_EFFORT.get(reasoning, reasoning)
+    elif provider == "deepseek":
+        payload["thinking"] = {
+            "type": "disabled" if reasoning == "none" else "enabled"
+        }
+        if reasoning != "none":
+            payload["reasoning_effort"] = {
+                "minimal": "low", "medium": "high", "xhigh": "high",
+            }.get(reasoning, reasoning)
     elif provider == "requesty":
         # Explicit Off must remain distinct from the model's default.
         payload["reasoning_effort"] = REQUESTY_EFFORT.get(reasoning, reasoning)
@@ -839,7 +862,7 @@ def chat(messages, api_key, model, system_prompt, reasoning="",
 
 
 def _get_json(url, headers, timeout=20):
-    req = urllib.request.Request(url, headers=headers)
+    req = _authenticated_request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))

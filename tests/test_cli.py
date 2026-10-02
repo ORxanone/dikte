@@ -410,6 +410,21 @@ class Providers(DikteTest):
                 self.assertEqual(parser.parse_args(["test-key", provider]).which,
                                  provider)
 
+    def test_deepseek_models_reaches_the_configured_endpoint(self):
+        opts = cli.build_parser().parse_args(["models", "--provider", "deepseek"])
+        self.assertEqual(opts.provider, "deepseek")
+        self.write_config({"deepseek_api_key": "test-only", "deepseek_base_url": "https://example.invalid/v1"})
+        with fake_urlopen({"data": [{"id": "deepseek-flash"}]}) as calls:
+            code, output, _ = self.run_cmd(cli.cmd_models, provider=opts.provider, transcription=False)
+        self.assertEqual(code, 0)
+        self.assertEqual(output.strip(), "deepseek-flash")
+        self.assertEqual(calls[0].full_url, "https://example.invalid/v1/models")
+        self.assertEqual(calls[0].get_header("Authorization"), "Bearer test-only")
+
+    def test_deepseek_has_no_transcription_model_catalog(self):
+        code, output, _ = self.run_cmd(cli.cmd_models, provider="deepseek", transcription=True)
+        self.assertEqual(code, 1)
+
     def test_the_model_list_is_read_from_the_chosen_provider(self):
         self.write_config({"groq_api_key": "gsk-test"})
         with fake_urlopen({"data": [{"id": "whisper-large-v3"}]}) as calls:
@@ -444,6 +459,16 @@ class Providers(DikteTest):
             code, out, _ = self.run_cmd(cli.cmd_test_key, which="opencode")
         self.assertEqual(code, 0)
         self.assertIn("opencode: connection works, 1 models visible", out)
+
+    def test_deepseek_is_a_choice_and_reports_under_its_own_name(self):
+        parser = cli.build_parser()
+        self.assertEqual(
+            parser.parse_args(["test-key", "deepseek"]).which, "deepseek")
+        self.write_config({"deepseek_api_key": "sk-deepseek-test"})
+        with fake_urlopen({"data": [{"id": "deepseek-flash"}]}):
+            code, out, _ = self.run_cmd(cli.cmd_test_key, which="deepseek")
+        self.assertEqual(code, 0)
+        self.assertIn("deepseek: connection works, 1 models visible", out)
 
     def test_requesty_is_a_choice_and_reports_under_its_own_name(self):
         parser = cli.build_parser()
@@ -544,6 +569,16 @@ class Doctor(DikteTest):
         self.assertIn("OpenCode Go key, cleaning up on glm-5.3",
                       self.run_doctor(as_json=False, cleanup_provider="opencode",
                                       cleanup_opencode_model="glm-5.3"))
+
+    def test_cleanup_on_deepseek_is_a_question_about_its_own_key(self):
+        reply = self.run_doctor(cleanup_provider="deepseek",
+                                cleanup_deepseek_model="deepseek-flash")
+        self.assertEqual(reply["cleanup"]["provider"], "deepseek")
+        self.assertEqual(reply["cleanup"]["model"], "deepseek-flash")
+        self.assertIn(
+            "DeepSeek key, cleaning up on deepseek-flash",
+            self.run_doctor(as_json=False, cleanup_provider="deepseek"),
+        )
 
     def test_cleanup_on_requesty_is_a_question_about_its_own_key(self):
         reply = self.run_doctor(cleanup_provider="requesty",

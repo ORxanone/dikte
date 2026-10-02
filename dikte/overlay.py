@@ -216,8 +216,7 @@ class Overlay(QWidget):
 
     @property
     def showing(self):
-        """Mapped and actually painting something. The window stays mapped while
-        idle, so isVisible() alone would always say yes."""
+        """Visible and actually painting something."""
         return self.isVisible() and not self._concealed
 
     def push_level(self, level):
@@ -260,28 +259,11 @@ class Overlay(QWidget):
             self._anim.start()
 
     def _conceal(self):
-        """Empty the window out instead of unmapping it.
-
-        Unmapping tears the window down and the next dictation builds a new one,
-        which makes the compositor repaint whatever sits underneath: on a tiled
-        desktop the terminal behind visibly flinches every time the indicator
-        goes away. So the window stays mapped and simply paints nothing. It has
-        to be a real repaint, not just zero opacity: with the animation stopped
-        nothing else damages the surface, and the stale frame would sit on the
-        screen until some other event made the compositor redraw it.
-
-        A window that stays mapped also stays clickable, though, and the one
-        that can be dismissed is the one that takes clicks. Left at full size it
-        would turn its corner of the screen into a dead zone long after there
-        was anything to see there, so it shrinks to a point. Resizing keeps the
-        surface alive, unlike hiding it.
-        """
+        """Unmap the window so bare X11 desktops do not show a black rectangle."""
         self._anim.stop()
         self.state = "hidden"
         self._concealed = True
-        self.repaint()
-        if self.dismissable:
-            self.resize(1, 1)
+        self.hide()
 
     def _resize_to_content(self):
         if self.state in LIVE:

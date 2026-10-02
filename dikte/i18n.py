@@ -42,13 +42,13 @@ def t(text, /, **kwargs):
 _TR_CASES = {
     "dative": {
         "Claude": "Claude'a", "Codex": "Codex'e", "OpenRouter": "OpenRouter'a",
-        "Google AI Studio": "Google AI Studio'ya", "Antigravity": "Antigravity'ye",
-        "OpenCode Go": "OpenCode Go'ya", "Requesty": "Requesty'ye",
+        "Google AI Studio": "Google AI Studio'ya", "DeepSeek": "DeepSeek'e",
+        "Antigravity": "Antigravity'ye", "OpenCode Go": "OpenCode Go'ya", "Requesty": "Requesty'ye",
     },
     "accusative": {
         "Claude": "Claude'u", "Codex": "Codex'i", "OpenRouter": "OpenRouter'ı",
-        "Google AI Studio": "Google AI Studio'yu", "Antigravity": "Antigravity'yi",
-        "OpenCode Go": "OpenCode Go'yu", "Requesty": "Requesty'yi",
+        "Google AI Studio": "Google AI Studio'yu", "DeepSeek": "DeepSeek'i",
+        "Antigravity": "Antigravity'yi", "OpenCode Go": "OpenCode Go'yu", "Requesty": "Requesty'yi",
     },
 }
 
@@ -220,12 +220,15 @@ TR = {
     "Could not connect: {reason}": "Bağlantı kurulamadı: {reason}",
     "Could not parse the response: {error}": "Yanıt çözümlenemedi: {error}",
 
-    "whisper.cpp has no macOS build, and Homebrew's leaves out the server. "
-    "Build whisper-server yourself and give its path here, or transcribe in "
-    "the cloud. See the README.":
-        "whisper.cpp'nin macOS sürümü yok, Homebrew'unki de sunucuyu dışarıda "
-        "bırakıyor. whisper-server'ı kendin derleyip yolunu buraya yaz, ya da "
-        "buluta çevir. README'ye bak.",
+    "whisper.cpp has no macOS build, and Homebrew's leaves out the "
+    "server. Build it (cmake -B build -DWHISPER_BUILD_SERVER=ON "
+    "-DGGML_METAL=ON && cmake --build build -j), put the binary "
+    "on the PATH, or transcribe in the cloud. See the README.":
+        "whisper.cpp'nin macOS için hazır paketi yok; Homebrew paketi de "
+        "sunucuyu içermiyor. Sunucuyu derle (cmake -B build "
+        "-DWHISPER_BUILD_SERVER=ON -DGGML_METAL=ON && cmake --build build -j) "
+        "ve whisper-server dosyasını PATH üzerindeki bir dizine koy "
+        "veya bulutta transkripsiyon yap. README'ye bak.",
 
     # --- settings: tabs and general ------------------------------------
     "Dikte Settings": "Dikte Ayarları",
@@ -311,12 +314,14 @@ TR = {
     "gsk_… (falls back to GROQ_API_KEY)": "gsk_… (boşsa GROQ_API_KEY kullanılır)",
     "sk-or-… (falls back to OPENROUTER_API_KEY)": "sk-or-… (boşsa OPENROUTER_API_KEY kullanılır)",
     "(falls back to GEMINI_API_KEY)": "(boşsa GEMINI_API_KEY kullanılır)",
+    "(falls back to DEEPSEEK_API_KEY)": "(boşsa DEEPSEEK_API_KEY kullanılır)",
     "(falls back to OPENCODE_API_KEY)": "(boşsa OPENCODE_API_KEY kullanılır)",
     "(falls back to REQUESTY_API_KEY)": "(boşsa REQUESTY_API_KEY kullanılır)",
     "Test": "Test et",
     "Trying…": "Deneniyor…",
     "Runs on OpenRouter.": "OpenRouter üzerinde çalışır.",
     "Runs on Google AI Studio.": "Google AI Studio üzerinde çalışır.",
+    "Runs on DeepSeek.": "DeepSeek üzerinde çalışır.",
     "Runs on OpenCode Go.": "OpenCode Go üzerinde çalışır.",
     "Runs on Requesty.": "Requesty üzerinde çalışır.",
     "Connection works. {count} audio models visible.":
