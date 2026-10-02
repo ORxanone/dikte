@@ -127,8 +127,8 @@ class Overlay(QWidget):
         # never reaches the window below. The flag is the one that tells the
         # display server the window has no input region at all. It is read when
         # the window is created and cannot be turned off later without the
-        # window being torn down and built again, which is why the dismissable
-        # one has to shrink itself instead (see _conceal).
+        # window being torn down and built again. Concealed indicators are
+        # unmapped in _conceal so they cannot intercept clicks.
         if dismissable:
             self.setCursor(Qt.CursorShape.PointingHandCursor)
         else:
