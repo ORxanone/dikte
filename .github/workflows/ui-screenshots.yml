@@ -30,11 +30,11 @@ jobs:
       QT_QPA_PLATFORM: ${{ matrix.platform }}
       QT_SCALE_FACTOR: "2"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.pr && format('refs/pull/{0}/head', inputs.pr) || github.ref }}
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
       - name: Install Linux display libraries
@@ -58,7 +58,7 @@ jobs:
         run: python -m tests.render_ui --output ui-screenshots --expect-platform ${{ matrix.platform }}
       - name: Upload screenshots and rendering details
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ui-screenshots-${{ runner.os }}
           path: ui-screenshots/
