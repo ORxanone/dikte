@@ -671,12 +671,17 @@ def cmd_devices(opts):
 
 def cmd_models(opts):
     conf = cfg.Config()
-    who = cfg.TRANSCRIBERS[opts.provider]
     try:
-        if opts.provider == "openrouter":
+        if opts.provider == "deepseek":
+            if opts.transcription:
+                return fail(opts, "DeepSeek is a cleanup provider, not a transcriber.")
+            models = api.openai_models(conf.deepseek_key(), conf["deepseek_base_url"],
+                                       "DeepSeek")
+        elif opts.provider == "openrouter":
             models = api.openrouter_models(conf.openrouter_key(),
                                            transcription=opts.transcription)
         else:
+            who = cfg.TRANSCRIBERS[opts.provider]
             models = api.openai_models(conf.api_key(who.key), conf[who.url],
                                        who.service)
     except api.ApiError as exc:
@@ -1245,7 +1250,7 @@ def build_parser():
     # --- the machine ------------------------------------------------------
     leaf(subs, "devices", "microphones and monitors").set_defaults(func=cmd_devices)
     models = leaf(subs, "models", "model ids a provider offers")
-    models.add_argument("--provider", choices=tuple(cfg.TRANSCRIBERS),
+    models.add_argument("--provider", choices=(*cfg.TRANSCRIBERS, "deepseek"),
                         default="openrouter")
     models.add_argument("--transcription", action="store_true",
                         help="only the speech-to-text ones")

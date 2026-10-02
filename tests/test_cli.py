@@ -410,6 +410,21 @@ class Providers(DikteTest):
                 self.assertEqual(parser.parse_args(["test-key", provider]).which,
                                  provider)
 
+    def test_deepseek_models_reaches_the_configured_endpoint(self):
+        opts = cli.build_parser().parse_args(["models", "--provider", "deepseek"])
+        self.assertEqual(opts.provider, "deepseek")
+        self.write_config({"deepseek_api_key": "test-only", "deepseek_base_url": "https://example.invalid/v1"})
+        with fake_urlopen({"data": [{"id": "deepseek-flash"}]}) as calls:
+            code, output, _ = self.run_cmd(cli.cmd_models, provider=opts.provider, transcription=False)
+        self.assertEqual(code, 0)
+        self.assertEqual(output.strip(), "deepseek-flash")
+        self.assertEqual(calls[0].full_url, "https://example.invalid/v1/models")
+        self.assertEqual(calls[0].get_header("Authorization"), "Bearer test-only")
+
+    def test_deepseek_has_no_transcription_model_catalog(self):
+        code, output, _ = self.run_cmd(cli.cmd_models, provider="deepseek", transcription=True)
+        self.assertEqual(code, 1)
+
     def test_the_model_list_is_read_from_the_chosen_provider(self):
         self.write_config({"groq_api_key": "gsk-test"})
         with fake_urlopen({"data": [{"id": "whisper-large-v3"}]}) as calls:
