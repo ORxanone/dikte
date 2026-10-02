@@ -536,6 +536,9 @@ DEFAULTS = {
     # A look at the releases page once a day, and nothing more than a look:
     # what is found opens a browser, never an installer.
     "update_check": True,
+    # A start at login goes straight to the tray, and the window waits for a
+    # click. Off, the login start opens the window the way a menu click does.
+    "start_in_tray": True,
     "file_timestamps": False,
     "file_cleanup": True,
     "file_cleanup_prompt": "",      # empty -> language-specific default

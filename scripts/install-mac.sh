@@ -414,6 +414,8 @@ cat > "$AGENT" <<EOF
     <string>/usr/bin/open</string>
     <string>-a</string>
     <string>$APP</string>
+    <string>--args</string>
+    <string>--autostart</string>
   </array>
   <key>RunAtLoad</key>   <true/>
   <key>KeepAlive</key>   <false/>

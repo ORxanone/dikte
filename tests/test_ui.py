@@ -58,6 +58,7 @@ CHANGED = {
     "silence_db": -42.0,
     "filter_hallucinations": False,
     "keep_audio": True,
+    "start_in_tray": False,
     "openai_api_key": "sk-test-key",
     "groq_api_key": "gsk-test-key",
     "openrouter_api_key": "sk-or-test-key",
@@ -184,6 +185,14 @@ class Settings(DikteTest):
                            QPoint(0, -120), Qt.MouseButton.NoButton,
                            Qt.KeyboardModifier.NoModifier,
                            Qt.ScrollPhase.NoScrollPhase, False)
+
+    def test_settings_is_not_tied_to_the_home_windows_desktop(self):
+        """A parentless dialog is transient for the whole application under
+        X11, and KWin then pulls the user to the home window's desktop."""
+        window = self.window(cfg.Config())
+        expected = (Qt.WindowType.Dialog if self.platform in ("darwin", "win32")
+                    else Qt.WindowType.Window)
+        self.assertEqual(window.windowType(), expected)
 
     def test_settings_keeps_configuration_and_exposes_separate_task_pages(self):
         window = self.window(cfg.Config())

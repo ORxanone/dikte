@@ -282,6 +282,11 @@ TR = {
     # --- updates --------------------------------------------------------
     "Updates": "Güncelleme",
     "Look for a newer version once a day": "Günde bir kez yeni sürüm var mı diye bak",
+    "Start in the tray when I log in": "Oturum açınca tepside başlat",
+    "Only the start at login. Opening Dikte from the menu always shows the "
+    "window, and so does a first start that still needs setting up.":
+        "Yalnızca oturum açılışındaki başlatma için. Dikte'yi menüden açmak "
+        "pencereyi her zaman gösterir; kurulumu bitmemiş ilk açılış da öyle.",
     "Dikte only looks. What it finds opens the release page in your browser; "
     "it downloads and installs nothing by itself.":
         "Dikte yalnızca bakar. Bulduğu şey tarayıcında sürüm sayfasını açar; "

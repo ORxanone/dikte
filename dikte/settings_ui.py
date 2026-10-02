@@ -928,6 +928,15 @@ class SettingsWindow(QDialog):
 
     def __init__(self, conf, meetings=None, parent=None):
         super().__init__(parent)
+        if parent is None and sys.platform not in ("darwin", "win32"):
+            # Under X11 a dialog without a parent is marked transient for the
+            # whole application, and KWin keeps such a window on the virtual
+            # desktop of the home window. Opening Settings from another
+            # desktop then switched the user back there. A plain top-level
+            # window is placed on its own, like the home window.
+            self.setWindowFlags(
+                (self.windowFlags() & ~Qt.WindowType.WindowType_Mask)
+                | Qt.WindowType.Window)
         self.conf = conf
         self.meetings = meetings
         # Filled in by _shortcut_row as the tabs are built: which combination
@@ -1272,6 +1281,14 @@ class SettingsWindow(QDialog):
             t("Keep audio files ({path})", path=str(cfg.RECORDINGS_DIR))
         )
         form.addRow("", self.keep_audio)
+
+        self.start_in_tray = QCheckBox(t("Start in the tray when I log in"))
+        self.start_in_tray.setToolTip(
+            t("Only the start at login. Opening Dikte from the menu always "
+              "shows the window, and so does a first start that still needs "
+              "setting up.")
+        )
+        form.addRow("", self.start_in_tray)
 
         self.update_check = QCheckBox(t("Look for a newer version once a day"))
         self.update_check.setToolTip(
@@ -2380,6 +2397,7 @@ class SettingsWindow(QDialog):
         self.filter_hallucinations.setChecked(conf["filter_hallucinations"])
         self.keep_audio.setChecked(conf["keep_audio"])
         self.update_check.setChecked(conf["update_check"])
+        self.start_in_tray.setChecked(conf["start_in_tray"])
         self._show_update(update.pending())
 
         for name, who in cfg.TRANSCRIBERS.items():
@@ -2517,6 +2535,7 @@ class SettingsWindow(QDialog):
         conf["filter_hallucinations"] = self.filter_hallucinations.isChecked()
         conf["keep_audio"] = self.keep_audio.isChecked()
         conf["update_check"] = self.update_check.isChecked()
+        conf["start_in_tray"] = self.start_in_tray.isChecked()
 
         provider = self.transcribe_provider.currentData() or "local"
         if provider in self._models:

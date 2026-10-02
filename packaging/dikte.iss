@@ -74,7 +74,7 @@ Name: "{autoprograms}\Dikte"; Filename: "{app}\Dikte.exe"
 ; Startup folder: it is the one place the setup program, the uninstaller and
 ; `dikte integrate` can all read and write without a COM library between them.
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
-    ValueType: string; ValueName: "Dikte"; ValueData: """{app}\Dikte.exe"""; \
+    ValueType: string; ValueName: "Dikte"; ValueData: """{app}\Dikte.exe"" --autostart"; \
     Flags: uninsdeletevalue; Tasks: autostart
 ; And taking it away again, for an update where the box was unticked. Both
 ; lines delete on uninstall, so an entry `dikte integrate` wrote later goes
