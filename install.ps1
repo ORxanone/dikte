@@ -69,7 +69,9 @@ $shell = New-Object -ComObject WScript.Shell
 foreach ($path in @($shortcut) + $(if ($Autostart) { @($autostartLink) } else { @() })) {
     $link = $shell.CreateShortcut($path)
     $link.TargetPath = $pythonw
-    $link.Arguments = "`"$entry`" --gui"
+    # The sign-in shortcut says so, which is what lets it stay in the tray.
+    $mode = if ($path -eq $autostartLink) { "--autostart" } else { "--gui" }
+    $link.Arguments = "`"$entry`" $mode"
     $link.WorkingDirectory = $repo
     $link.Description = "Dikte: dictation"
     $link.Save()

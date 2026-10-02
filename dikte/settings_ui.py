@@ -1273,6 +1273,14 @@ class SettingsWindow(QDialog):
         )
         form.addRow("", self.keep_audio)
 
+        self.start_in_tray = QCheckBox(t("Start in the tray when I log in"))
+        self.start_in_tray.setToolTip(
+            t("Only the start at login. Opening Dikte from the menu always "
+              "shows the window, and so does a first start that still needs "
+              "setting up.")
+        )
+        form.addRow("", self.start_in_tray)
+
         self.update_check = QCheckBox(t("Look for a newer version once a day"))
         self.update_check.setToolTip(
             t("Dikte only looks. What it finds opens the release page in your "
@@ -2380,6 +2388,7 @@ class SettingsWindow(QDialog):
         self.filter_hallucinations.setChecked(conf["filter_hallucinations"])
         self.keep_audio.setChecked(conf["keep_audio"])
         self.update_check.setChecked(conf["update_check"])
+        self.start_in_tray.setChecked(conf["start_in_tray"])
         self._show_update(update.pending())
 
         for name, who in cfg.TRANSCRIBERS.items():
@@ -2517,6 +2526,7 @@ class SettingsWindow(QDialog):
         conf["filter_hallucinations"] = self.filter_hallucinations.isChecked()
         conf["keep_audio"] = self.keep_audio.isChecked()
         conf["update_check"] = self.update_check.isChecked()
+        conf["start_in_tray"] = self.start_in_tray.isChecked()
 
         provider = self.transcribe_provider.currentData() or "local"
         if provider in self._models:
