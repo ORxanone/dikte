@@ -55,7 +55,8 @@ def main():
     results = {'platform': subprocess.check_output(['sw_vers'], text=True),
                'architecture': os.uname().machine, 'python': sys.version}
     with tempfile.TemporaryDirectory(prefix='dikte-native-') as temp:
-        root = Path(temp)
+        # LaunchServices canonicalizes macOS's /var -> /private/var alias.
+        root = Path(temp).resolve()
         hostile = root / "paths ' \" $(touch INJECTED) `touch INJECTED2` \\\n"
         hostile.mkdir()
         bundle = hostile / 'Dikte.app'
