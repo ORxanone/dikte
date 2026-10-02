@@ -219,7 +219,8 @@ def cmd_ask(opts):
         key = {"claude": "assistant_model", "codex": "assistant_codex_model",
                "openrouter": "assistant_openrouter_model",
                "agy": "assistant_agy_model",
-               "opencode": "assistant_opencode_model"}[assistant.provider(conf)]
+               "opencode": "assistant_opencode_model",
+               "requesty": "assistant_requesty_model"}[assistant.provider(conf)]
         conf[key] = opts.model
     if opts.dir:
         conf["assistant_dir"] = opts.dir
@@ -513,7 +514,7 @@ def cmd_history_clear(opts):
 # --- settings ---------------------------------------------------------------
 
 SECRET_KEYS = ("openai_api_key", "groq_api_key", "openrouter_api_key",
-               "gemini_api_key", "opencode_api_key")
+               "gemini_api_key", "deepseek_api_key", "opencode_api_key", "requesty_api_key")
 
 
 def _mask(key, value):
@@ -683,12 +684,20 @@ def cmd_devices(opts):
 
 def cmd_models(opts):
     conf = cfg.Config()
-    who = cfg.TRANSCRIBERS[opts.provider]
     try:
-        if opts.provider == "openrouter":
+        if opts.provider == "deepseek":
+            if opts.transcription:
+                return fail(opts, "DeepSeek is a cleanup provider, not a transcriber.")
+            models = api.openai_models(conf.deepseek_key(), conf["deepseek_base_url"],
+                                       "DeepSeek")
+        elif opts.provider == "openrouter":
             models = api.openrouter_models(conf.openrouter_key(),
                                            transcription=opts.transcription)
+        elif opts.provider == "requesty":
+            models = api.requesty_models(conf.requesty_key(), conf["requesty_base_url"],
+                                         transcription=opts.transcription)
         else:
+            who = cfg.TRANSCRIBERS[opts.provider]
             models = api.openai_models(conf.api_key(who.key), conf[who.url],
                                        who.service)
     except api.ApiError as exc:
@@ -723,6 +732,16 @@ def cmd_test_key(opts):
             results["gemini"] = {"ok": True, "message": message}
         except api.ApiError as exc:
             results["gemini"] = {"ok": False, "message": str(exc)}
+    if opts.which in ("deepseek", "all"):
+        try:
+            count = len(api.openai_models(conf.deepseek_key(),
+                                          conf["deepseek_base_url"], "DeepSeek"))
+            results["deepseek"] = {
+                "ok": True,
+                "message": f"connection works, {count} models visible",
+            }
+        except api.ApiError as exc:
+            results["deepseek"] = {"ok": False, "message": str(exc)}
     if opts.which in ("opencode", "all"):
         try:
             count = len(api.openai_models(conf.opencode_key(),
@@ -973,7 +992,9 @@ def cmd_doctor(opts):
     cleanup_service, cleanup_key = {
         "openrouter": ("OpenRouter", conf.openrouter_key()),
         "gemini": ("Google AI Studio", conf.gemini_key()),
+        "deepseek": ("DeepSeek", conf.deepseek_key()),
         "opencode": ("OpenCode Go", conf.opencode_key()),
+        "requesty": ("Requesty", conf.requesty_key()),
     }.get(cleaner, ("", ""))
     if cleanup_service:
         cleanup_ready = bool(cleanup_key)
@@ -1246,14 +1267,15 @@ def build_parser():
     # --- the machine ------------------------------------------------------
     leaf(subs, "devices", "microphones and monitors").set_defaults(func=cmd_devices)
     models = leaf(subs, "models", "model ids a provider offers")
-    models.add_argument("--provider", choices=tuple(cfg.TRANSCRIBERS),
+    models.add_argument("--provider", choices=(*cfg.TRANSCRIBERS, "deepseek"),
                         default="openrouter")
     models.add_argument("--transcription", action="store_true",
                         help="only the speech-to-text ones")
     models.set_defaults(func=cmd_models)
     test = leaf(subs, "test-key", "check the API keys")
     test.add_argument("which", nargs="?", default="all",
-                      choices=("all", *cfg.TRANSCRIBERS, "gemini", "opencode"))
+                      choices=("all", *cfg.TRANSCRIBERS, "gemini", "deepseek",
+                               "opencode"))
     test.set_defaults(func=cmd_test_key)
     leaf(subs, "doctor", "keys, programs, and what is missing").set_defaults(func=cmd_doctor)
 

@@ -97,7 +97,7 @@ Local speech to text is the one piece that has to be built by hand there:
 whisper.cpp publishes no macOS binary and Homebrew's is configured with
 `WHISPER_BUILD_SERVER=OFF`, so it installs `whisper-cli` and not the server
 Dikte talks to. Build it (`cmake -B build -DWHISPER_BUILD_SERVER=ON
--DGGML_METAL=ON && cmake --build build -j`) and give Settings → API the path, or
+-DGGML_METAL=ON && cmake --build build -j`) and put `build/bin/whisper-server` in a directory on your `PATH`, or
 transcribe in the cloud. A meeting needs BlackHole or Loopback
 (`brew install blackhole-2ch`); dictation does not.
 
@@ -120,18 +120,21 @@ or runs it on the spot.
 
 Speech to text and cleanup each pick a provider in the settings window, and both
 run here by default, on models of your own. The cloud is the other option:
-speech to text on **OpenAI**, **Groq** or **OpenRouter** (`gpt-4o-transcribe`),
-cleanup on OpenRouter (`google/gemini-3.5-flash-lite`), on **Google AI Studio**
-(`gemini-3.5-flash-lite`), on **OpenCode Go** (`deepseek-v4-flash`) or, when one
-of them is installed, on Claude Code, Codex or Antigravity. The first three are
-a single HTTP request; the three CLIs each open a whole session to do it, which
-is where their few extra seconds go. The keys fall back to `OPENAI_API_KEY`,
-`GROQ_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY` and `OPENCODE_API_KEY`,
+speech to text on **OpenAI**, **Groq**, **OpenRouter** or **Requesty**
+(`gpt-4o-transcribe`); cleanup on OpenRouter or Requesty
+(`google/gemini-3.5-flash-lite`), **Google AI Studio**
+(`gemini-3.5-flash-lite`), **DeepSeek** (`deepseek-flash`), **OpenCode Go**
+(`deepseek-v4-flash`) or, when installed, Claude Code, Codex or Antigravity.
+The five hosted cleanup providers use one HTTP request; the three CLIs each
+open a whole session, which is where their few extra seconds go. Keys fall
+back to `OPENAI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`,
+`GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY` and `REQUESTY_API_KEY`,
 and are stored in
 `~/.config/dikte/config.json`, mode 600, or in
 `~/Library/Application Support/Dikte` on a Mac. Cleanup can be switched off, in
 which case the raw transcript is pasted, and a thinking model's effort can be
-set next to it.
+set next to it. Requesty keeps requests in the EU when `requesty_base_url` is set
+to `https://router.eu.requesty.ai/v1`.
 
 ## Using it
 
@@ -207,7 +210,8 @@ running.
   a thing you can say to a window that is not Claude. Codex (`codex exec`) and
   Antigravity (`agy -p`) run the same way, though Antigravity takes neither a
   permission mode nor a sandbox from Dikte: what it may do without asking is
-  whatever its own allow-rules say. OpenRouter or OpenCode Go is there as a
+  whatever its own allow-rules say. OpenRouter, OpenCode Go or Requesty is
+  there as a
   plain question-and-answer fallback for a machine with no CLI on it. Provider,
   model, permissions and working directory are under Settings → Agent, and
   commands close together stay in one conversation.

@@ -66,17 +66,22 @@ CHANGED = {
     "groq_api_key": "gsk-test-key",
     "openrouter_api_key": "sk-or-test-key",
     "gemini_api_key": "AIza-test-key",
+    "deepseek_api_key": "sk-deepseek-test-key",
+    "requesty_api_key": "rqsty-test-key",
     "transcribe_provider": "openrouter",
     "transcribe_model": "whisper-1",
     "groq_transcribe_model": "whisper-large-v3",
     "openrouter_transcribe_model": "openai/whisper-1",
+    "requesty_transcribe_model": "openai/whisper-1",
     "cleanup_enabled": False,
     "cleanup_provider": "local",
     "cleanup_model": "some/other-model",
     "cleanup_claude_model": "opus",
     "cleanup_codex_model": "gpt-5",
     "cleanup_gemini_model": "gemini-2.5-flash",
+    "cleanup_deepseek_model": "deepseek-v4-pro",
     "cleanup_agy_model": "gemini-3.1-pro-low",
+    "cleanup_requesty_model": "gpt-5.4-mini",
     "cleanup_reasoning": "high",
     "local_model": "ggml-small.bin",
     "local_gpu": False,
@@ -100,6 +105,7 @@ CHANGED = {
     "assistant_codex_sandbox": "read-only",
     "assistant_openrouter_model": "some/agent-model",
     "assistant_agy_model": "gemini-3.1-pro-low",
+    "assistant_requesty_model": "deepseek-v4-flash",
     "assistant_reasoning": "high",
     "assistant_dir": "/tmp",
     "assistant_timeout": 600,
@@ -373,7 +379,9 @@ class Settings(DikteTest):
         window = self.window(cfg.Config())
         boxes = {"openrouter": window.cleanup_model_row,
                  "opencode": window.cleanup_opencode_model_row,
+                 "requesty": window.cleanup_requesty_model_row,
                  "claude": window.cleanup_claude_model,
+                 "deepseek": window.cleanup_deepseek_model_row,
                  "codex": window.cleanup_codex_model}
         for provider, box in boxes.items():
             with self.subTest(provider=provider):
@@ -405,13 +413,16 @@ class Settings(DikteTest):
             window.file_model,
             window.cleanup_model,
             window.cleanup_gemini_model,
+            window.cleanup_deepseek_model,
             window.cleanup_opencode_model,
+            window.cleanup_requesty_model,
             window.cleanup_agy_model,
             window.cleanup_claude_model,
             window.cleanup_codex_model,
             window.assistant_model,
             window.assistant_agy_model,
             window.assistant_opencode_model,
+            window.assistant_requesty_model,
             window.assistant_codex_model,
             window.assistant_openrouter_model,
             window.meeting_model,
@@ -482,6 +493,35 @@ class Settings(DikteTest):
         self.assertFalse(window.cleanup_opencode_model_row.isHidden())
         self.assertTrue(window.cleanup_model_row.isHidden())
 
+    def test_requesty_answering_refills_both_of_its_boxes(self):
+        conf = self.config(cleanup_requesty_model="my-own-model")
+        window = self.window(conf)
+        window._on_requesty_models_loaded(["gpt-5.4-mini", "openai/gpt-4o-mini"], "")
+        for combo in (window.cleanup_requesty_model,
+                      window.assistant_requesty_model):
+            with self.subTest(combo=combo.objectName() or "combo"):
+                offered = [combo.itemText(i) for i in range(combo.count())]
+                self.assertEqual(offered, ["gpt-5.4-mini", "openai/gpt-4o-mini"])
+        self.assertEqual(window.cleanup_requesty_model.currentText(),
+                         "my-own-model")
+
+    def test_requesty_s_list_arriving_at_open_leaves_the_other_boxes_alone(self):
+        window = self.window(self.config(cleanup_requesty_model="my-own-model"))
+        before = window.cleanup_model.count()
+        window._on_hosted_models_loaded("requesty", ["gpt-5.4-mini"])
+        combo = window.cleanup_requesty_model
+        self.assertEqual([combo.itemText(i) for i in range(combo.count())],
+                         ["gpt-5.4-mini"])
+        self.assertEqual(combo.currentText(), "my-own-model")
+        self.assertEqual(window.cleanup_model.count(), before)
+
+    def test_requesty_agent_shows_its_own_box(self):
+        window = self.window(cfg.Config())
+        window._select_data(window.assistant_provider, "requesty")
+        self.assertFalse(window.requesty_box.isHidden())
+        self.assertTrue(window.openrouter_box.isHidden())
+        self.assertTrue(window.opencode_box.isHidden())
+
     def test_agy_answering_refills_both_of_its_boxes(self):
         """The same arrangement as Codex: both boxes, nothing chosen is lost."""
         conf = self.config(cleanup_agy_model="my-own-model")
@@ -525,10 +565,12 @@ class Settings(DikteTest):
     def test_a_key_on_file_is_fetched_with_at_open(self):
         window = self.window(self.config(openrouter_api_key="sk-or-x",
                                          gemini_api_key="AIza-x",
-                                         opencode_api_key="opencode-x"))
+                                         deepseek_api_key="sk-deepseek-x",
+                                         opencode_api_key="opencode-x",
+                                         requesty_api_key="rqsty-x"))
         with mock.patch.object(settings_ui.threading, "Thread") as thread:
             REAL_LOAD_HOSTED_MODELS(window)
-        self.assertEqual(thread.call_count, 3)
+        self.assertEqual(thread.call_count, 5)
 
     def test_the_update_line_names_the_version_that_is_running(self):
         window = self.window(cfg.Config())
@@ -664,6 +706,16 @@ class Settings(DikteTest):
         window.transcribe_provider.setCurrentIndex(
             window.transcribe_provider.findData("openai"))
         self.assertFalse(window.stt_form.isRowVisible(window.file_model_row))
+
+    def test_requesty_has_no_speech_model_list_to_fetch(self):
+        window = self.window(cfg.Config())
+        window.transcribe_provider.setCurrentIndex(
+            window.transcribe_provider.findData("requesty"))
+        self.assertTrue(window.refresh_transcribe_models.isHidden())
+        self.assertFalse(window.stt_form.isRowVisible(window.file_model_row))
+        window.transcribe_provider.setCurrentIndex(
+            window.transcribe_provider.findData("openrouter"))
+        self.assertFalse(window.refresh_transcribe_models.isHidden())
 
     def test_the_provider_box_offers_every_provider_config_knows(self):
         window = self.window(cfg.Config())
@@ -1138,23 +1190,19 @@ class Overlay(DikteTest):
         self.assertTrue(flags & Qt.WindowType.WindowStaysOnTopHint)
 
     def test_it_lets_a_click_through_to_whatever_is_under_it(self):
-        """It stays mapped while idle, so without this its corner of the screen
-        would stop taking clicks for good. The widget attribute is not enough:
-        on a top-level window it only makes Qt drop the event it already took."""
+        """A visible indicator must not intercept clicks beneath it."""
         from PyQt6.QtCore import Qt
         flags = self.overlay().windowFlags()
         self.assertTrue(flags & Qt.WindowType.WindowTransparentForInput)
 
-    def test_the_one_that_takes_clicks_shrinks_out_of_the_way(self):
-        """It has to stay clickable, so it cannot be transparent to input; it
-        gets out of the way by leaving nothing there to click instead."""
+    def test_the_one_that_takes_clicks_unmaps_when_dismissed(self):
         widget = self.overlay(dismissable=True)
         widget.show_busy("Asking Claude…")
-        self.assertGreater(widget.width(), 1)
+        self.assertTrue(widget.isVisible())
         widget.dismiss()
-        self.assertEqual((widget.width(), widget.height()), (1, 1))
+        self.assertFalse(widget.isVisible())
         widget.show_busy("Asking Claude…")
-        self.assertGreater(widget.width(), 1)
+        self.assertTrue(widget.isVisible())
 
     def test_recording_then_working_then_done(self):
         widget = self.overlay()
@@ -1166,6 +1214,7 @@ class Overlay(DikteTest):
         widget.show_done("Pasted")
         widget._conceal()
         self.assertFalse(widget.showing)
+        self.assertFalse(widget.isVisible())
 
     def test_a_held_recording_says_so_and_stops_moving(self):
         """Everything about the ribbon says a recording is running; a pause the
@@ -2609,6 +2658,7 @@ class LocalModels(DikteTest):
         window = self.window(cfg.Config())
         rows = {"openrouter": window.cleanup_model_row,
                 "gemini": window.cleanup_gemini_model_row,
+                "deepseek": window.cleanup_deepseek_model_row,
                 "claude": window.cleanup_claude_model,
                 "codex": window.cleanup_codex_model,
                 "agy": window.cleanup_agy_model}

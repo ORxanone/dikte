@@ -95,7 +95,8 @@ Orada elle derlenmesi gereken tek parça yerel transkripsiyon: whisper.cpp'nin
 macOS sürümü yok, Homebrew'unki de `WHISPER_BUILD_SERVER=OFF` ile derleniyor,
 yani `whisper-cli` kuruluyor, Dikte'nin konuştuğu sunucu değil. Kendin derle
 (`cmake -B build -DWHISPER_BUILD_SERVER=ON -DGGML_METAL=ON && cmake --build
-build -j`) ve yolunu Ayarlar → API'ye yaz, ya da buluta çevir. Toplantı için
+build -j`) ve `build/bin/whisper-server` dosyasını `PATH` üzerindeki bir dizine koy,
+ya da buluta çevir. Toplantı için
 BlackHole veya Loopback gerekiyor (`brew install blackhole-2ch`); dikte için
 gerekmiyor.
 
@@ -116,18 +117,20 @@ kurmaz, sayfayı açar. Genel sekmesi bu denetimi kapatır ya da anında çalı�
 
 Sesi yazıya çevirme ve temizleme, ayarlar penceresinde ayrı ayrı sağlayıcı
 seçer; ikisi de varsayılan olarak burada, kendi modellerinle çalışır. Bulutu
-seçersen sesi yazıya çevirme **OpenAI**, **Groq** ya da **OpenRouter**'da
-(varsayılan `gpt-4o-transcribe`), temizleme OpenRouter'da
-(`google/gemini-3.5-flash-lite`), **Google AI Studio**'da
-(`gemini-3.5-flash-lite`), **OpenCode Go**'da (`deepseek-v4-flash`) ya da
-kuruluysa Claude Code, Codex veya Antigravity'de çalışır. İlk üçü tek bir HTTP
-isteği; üç CLI ise bunun için birer oturum açar, fazladan giden birkaç saniye de
-oradan gelir. Anahtarları boş bırakırsan `OPENAI_API_KEY`, `GROQ_API_KEY`,
-`OPENROUTER_API_KEY`, `GEMINI_API_KEY` ve `OPENCODE_API_KEY` kullanılır;
-anahtarlar `~/.config/dikte/config.json` içinde, izinler 600, Mac'te ise
-`~/Library/Application Support/Dikte` altında.
+seçersen sesi yazıya çevirme **OpenAI**, **Groq**, **OpenRouter** ya da
+**Requesty**'de (varsayılan `gpt-4o-transcribe`); temizleme OpenRouter veya
+Requesty'de (`google/gemini-3.5-flash-lite`), **Google AI Studio**'da
+(`gemini-3.5-flash-lite`), **DeepSeek**'te (`deepseek-flash`), **OpenCode Go**'da
+(`deepseek-v4-flash`) ya da kuruluysa Claude Code, Codex veya Antigravity'de
+çalışır. Beş bulut temizleme sağlayıcısı tek bir HTTP isteği kullanır; üç CLI
+ise bunun için birer oturum açar. Anahtarları boş bırakırsan `OPENAI_API_KEY`,
+`GROQ_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`,
+`OPENCODE_API_KEY` ve `REQUESTY_API_KEY` kullanılır. Anahtarlar
+`~/.config/dikte/config.json` içinde, izinler 600, Mac'te ise
+`~/Library/Application Support/Dikte` altında tutulur.
 Temizlemeyi tamamen kapatabilirsin, o zaman ham transkript yapıştırılır; modelin
-yanındaki kutudan düşünme seviyesini de seçebilirsin.
+yanındaki kutudan düşünme seviyesini de seçebilirsin. `requesty_base_url`
+`https://router.eu.requesty.ai/v1` yapılırsa Requesty istekleri AB içinde tutar.
 
 ## Kullanım
 
@@ -202,7 +205,8 @@ olmasını ister.
   olmanı sağlayan da budur. Codex (`codex exec`) ile Antigravity (`agy -p`) da
   aynı şekilde çalışır; ama Antigravity'ye Dikte bir izin kipi ya da sandbox
   veremiyor, sormadan ne yapabileceğini kendi allow-rule'ları belirliyor.
-  OpenRouter ya da OpenCode Go ise hiçbiri kurulu olmayan bir makinede düz soru
+  OpenRouter, OpenCode Go ya da Requesty ise hiçbiri kurulu olmayan bir
+  makinede düz soru
   cevap için duruyor. Sağlayıcı, model, izinler ve çalışma dizini Ayarlar → Ajan
   sekmesinde; arka arkaya verilen komutlar tek bir konuşmada kalır.
 - **Toplantılar** mikrofonla hoparlör çıkışından aynı anda kaydedilir; kimin ne

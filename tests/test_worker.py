@@ -42,6 +42,15 @@ class Chain(DikteTest):
         pipeline.failed.connect(failures.append)
         pipeline.stage.connect(stages.append)
         pipeline.cancelled.connect(lambda: cancels.append(True))
+        # The waits between retries record themselves instead of running: what
+        # the tests pin is the ladder's timing, not the wall clock. The real
+        # Event would block on wait() for real, and nothing here cancels.
+        sleeps = []
+        stop = mock.Mock(spec=threading.Event)
+        stop.wait.side_effect = (lambda seconds:
+                                 sleeps.append(seconds) or False)
+        stop.is_set.return_value = False
+        pipeline._stop = stop
 
         cleanup = (mock.Mock(side_effect=cleanup_error) if cleanup_error
                    else mock.Mock(return_value=cleaned))
@@ -75,7 +84,7 @@ class Chain(DikteTest):
                            self.rms if rms is None else rms, ask, paste_override,
                            focus)
         return {"done": done, "failures": failures, "stages": stages,
-                "cancelled": cancels, **calls}
+                "cancelled": cancels, "sleeps": sleeps, **calls}
 
     # ---- the ordinary run -------------------------------------------------
 
@@ -157,6 +166,84 @@ class Chain(DikteTest):
         kept = list(cfg.RECORDINGS_DIR.glob("*.wav"))
         self.assertEqual(len(kept), 1)
         self.assertFalse(os.path.exists(self.wav))
+
+    # ---- the retry ladder ---------------------------------------------------
+
+    def test_a_rate_limited_dictation_is_asked_again_and_survives(self):
+        """A 429 is the service having a busy minute, not the run being wrong:
+        the request is asked again and the dictation lands as usual."""
+        run = self.run_chain(transcribe_error=[
+            api.ApiError("rate limited", 429),
+            ("uh, book it for Thursday", "en")])
+        self.assertEqual(run["failures"], [])
+        self.assertEqual(run["transcribe_detected"].call_count, 2)
+        self.assertEqual(run["sleeps"], [10])
+        self.assertTrue(any("Retrying in 10 s (2/5)" in s for s in run["stages"]))
+        self.assertEqual(run["done"][0],
+                         ("uh, book it for Thursday", "Book it for Thursday.",
+                          "", "en"))
+
+    def test_the_retry_waits_grow_between_attempts(self):
+        """The ladder starts short and grows, and the line the user is watching
+        always names the failure and comes back to the stage afterwards."""
+        pipeline = worker.Pipeline(self.conf)
+        sleeps, stages = [], []
+        pipeline.stage.connect(stages.append)
+        stop = mock.Mock(spec=threading.Event)
+        stop.wait.side_effect = (lambda seconds:
+                                 sleeps.append(seconds) or False)
+        stop.is_set.return_value = False
+        pipeline._stop = stop
+        calls = []
+
+        def call():
+            calls.append(1)
+            if len(calls) < 3:
+                raise api.ApiError("rate limited", 429)
+            return "transcript"
+
+        self.assertEqual(pipeline._transcribe(call, "Transcribing…"),
+                         "transcript")
+        self.assertEqual(calls, [1, 1, 1])
+        self.assertEqual(sleeps, [10, 30])
+        self.assertEqual(stages, [
+            "rate limited Retrying in 10 s (2/5)…", "Transcribing…",
+            "rate limited Retrying in 30 s (3/5)…", "Transcribing…"])
+
+    def test_the_ladder_gives_up_after_its_last_wait(self):
+        """Every rung spent, the run fails as before and the audio is kept."""
+        run = self.run_chain(
+            transcribe_error=[api.ApiError("rate limited", 429)] * 5)
+        self.assertEqual(run["transcribe_detected"].call_count, 5)
+        self.assertEqual(run["sleeps"], [10, 30, 60, 120])
+        self.assertTrue(any("Retrying in 120 s (5/5)" in s for s in run["stages"]))
+        self.assertIn("rate limited", run["failures"][0])
+        self.assertIn("kept", run["failures"][0])
+        self.assertEqual(len(list(cfg.RECORDINGS_DIR.glob("*.wav"))), 1)
+
+    def test_a_stop_landing_mid_wait_ends_the_run_with_its_reason(self):
+        """Cancelling during a wait fails the run with the error it was
+        waiting out, audio kept one level up, rather than asking once more."""
+        pipeline = worker.Pipeline(self.conf)
+        stop = mock.Mock(spec=threading.Event)
+        stop.wait.return_value = True  # cancel arrived during the wait
+        stop.is_set.return_value = False
+        pipeline._stop = stop
+        calls = []
+
+        def call():
+            calls.append(1)
+            raise api.ApiError("rate limited", 429)
+
+        with self.assertRaises(api.ApiError):
+            pipeline._transcribe(call, "Transcribing…")
+        self.assertEqual(calls, [1])
+
+    def test_a_failure_the_ladder_cannot_fix_is_not_retried(self):
+        """A rejected key is just as wrong the second time: no wait, no retry."""
+        run = self.run_chain(transcribe_error=api.ApiError("no credit", 402))
+        self.assertEqual(run["transcribe_detected"].call_count, 1)
+        self.assertEqual(run["sleeps"], [])
 
     def test_two_failures_in_one_second_keep_both_recordings(self):
         self.run_chain(transcribe_error=api.ApiError("down"))

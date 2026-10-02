@@ -427,10 +427,15 @@ DEFAULTS = {
     "groq_base_url": "https://api.groq.com/openai/v1",
     "openrouter_api_key": "",
     "openrouter_base_url": "https://openrouter.ai/api/v1",
+    "requesty_api_key": "",
+    # https://router.eu.requesty.ai/v1 keeps the requests in the EU.
+    "requesty_base_url": "https://router.requesty.ai/v1",
     "gemini_api_key": "",
     # Google's OpenAI-compatible endpoint. Cleanup only: there is no
     # /audio/transcriptions behind it, so it is not one of the TRANSCRIBERS.
     "gemini_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "deepseek_api_key": "",
+    "deepseek_base_url": "https://api.deepseek.com",
     "opencode_api_key": "",
     "opencode_base_url": "https://opencode.ai/zen/go/v1",
     "transcribe_provider": "local",  # "local", or a key of TRANSCRIBERS
@@ -440,6 +445,7 @@ DEFAULTS = {
     # What a timestamped run (subtitles) asks OpenRouter for: not every model
     # there returns segment times. Empty -> openai/whisper-1.
     "openrouter_file_model": "",
+    "requesty_transcribe_model": "openai/gpt-4o-transcribe",
     # A stored language overrides this default. Hosted providers receive no
     # language hint in auto mode; local whisper also reports the detected code.
     "language": "auto",
@@ -465,8 +471,10 @@ DEFAULTS = {
     "cleanup_claude_model": "haiku",   # Claude Code: an alias, or a full model id
     "cleanup_codex_model": "",         # empty -> whatever Codex is set to
     "cleanup_gemini_model": "gemini-3.5-flash-lite",
+    "cleanup_deepseek_model": "deepseek-flash",
     "cleanup_agy_model": "",           # empty -> whatever Antigravity is set to
     "cleanup_opencode_model": "deepseek-v4-flash",
+    "cleanup_requesty_model": "google/gemini-3.5-flash-lite",
     "cleanup_reasoning": "",        # empty -> whatever the model does by default
 
     # --- llama.cpp, on this machine -----------------------------------------
@@ -560,6 +568,7 @@ DEFAULTS = {
     "assistant_openrouter_model": "google/gemini-3.5-flash",
     "assistant_agy_model": "",      # empty -> whatever Antigravity is set to
     "assistant_opencode_model": "deepseek-v4-flash",
+    "assistant_requesty_model": "google/gemini-3.5-flash",
     "assistant_reasoning": "",      # empty -> the model's own default
     "assistant_dir": "",            # empty -> the home directory
     "assistant_prompt": "",         # empty -> language-specific default
@@ -600,6 +609,8 @@ TRANSCRIBERS = {
                         "groq_transcribe_model"),
     "openrouter": Transcriber("OpenRouter", "openrouter_api_key",
                               "openrouter_base_url", "openrouter_transcribe_model"),
+    "requesty": Transcriber("Requesty", "requesty_api_key",
+                            "requesty_base_url", "requesty_transcribe_model"),
 }
 
 # One lock for the history file and the meeting index both, rather than one
@@ -725,8 +736,14 @@ class Config:
     def gemini_key(self):
         return self.api_key("gemini_api_key")
 
+    def deepseek_key(self):
+        return self.api_key("deepseek_api_key")
+
     def opencode_key(self):
         return self.api_key("opencode_api_key")
+
+    def requesty_key(self):
+        return self.api_key("requesty_api_key")
 
     def transcribe_target(self):
         """Key, endpoint and model for whichever provider does speech to text.

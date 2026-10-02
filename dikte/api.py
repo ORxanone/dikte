@@ -1,7 +1,7 @@
-"""OpenAI, Groq, OpenRouter, Google AI Studio and this machine, stdlib only.
+"""OpenAI, Groq, OpenRouter, Requesty, Google AI Studio and this machine, stdlib only.
 
-Transcription runs on the first three and on this machine: Groq and OpenRouter
-both mirror OpenAI's /audio/transcriptions endpoint field for field, and ggml.py
+Transcription runs on the first four and on this machine: Groq, OpenRouter and
+Requesty mirror OpenAI's /audio/transcriptions endpoint field for field, and ggml.py
 starts whisper.cpp on that same path, so one multipart request serves all of
 them and only the key, the base URL and the model id change. llama.cpp answers
 /chat/completions the way OpenRouter does, so cleanup here is the same request
@@ -38,6 +38,7 @@ USER_AGENT = f"dikte/1.0 (+{APP_URL})"
 OPENAI_URL = "https://api.openai.com/v1"
 GROQ_URL = "https://api.groq.com/openai/v1"
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
+REQUESTY_URL = "https://router.requesty.ai/v1"
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
 
 # The floor for a local request. The timeouts elsewhere are sized for a hosted
@@ -56,6 +57,9 @@ Target = collections.namedtuple(
 
 # What answers with segment times on OpenRouter when nothing else was chosen.
 OPENROUTER_FILE_MODEL = "openai/whisper-1"
+# Requesty names its models the same way, and of the ones it transcribes with
+# only whisper-1 answers verbose_json at all.
+REQUESTY_FILE_MODEL = "openai/whisper-1"
 
 
 def timestamp_model(provider, selected="", file_model=""):
@@ -74,6 +78,8 @@ def timestamp_model(provider, selected="", file_model=""):
         return selected or "whisper-large-v3-turbo"
     if provider == "openrouter":
         return file_model or OPENROUTER_FILE_MODEL
+    if provider == "requesty":
+        return REQUESTY_FILE_MODEL
     return "whisper-1"
 
 
@@ -250,8 +256,24 @@ def explain(exc, service):
     return ApiError(f"{service}: {exc}", exc.status, retryable=exc.retryable)
 
 
+def _authenticated_request(url, data=None, headers=None, method=None):
+    """Send credentials only to the explicitly configured endpoint.
+
+    urllib copies ordinary headers to redirected requests, including across
+    hosts and HTTPS downgrades. Unredirected headers reach the first endpoint
+    only, in both the normal and cancellable request paths.
+    """
+    request = urllib.request.Request(url, data=data, method=method)
+    for name, value in (headers or {}).items():
+        if name.lower() == "authorization":
+            request.add_unredirected_header(name, value)
+        else:
+            request.add_header(name, value)
+    return request
+
+
 def _request(url, data, headers, timeout=120, aborter=None):
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    req = _authenticated_request(url, data=data, headers=headers, method="POST")
     try:
         with _opened(req, timeout, aborter) as resp:
             return json.loads(resp.read().decode("utf-8"))
@@ -336,8 +358,9 @@ def _headers(provider, api_key, content_type=None):
         headers["Authorization"] = f"Bearer {api_key}"
     if content_type:
         headers["Content-Type"] = content_type
-    if provider == "openrouter":
+    if provider in ("openrouter", "requesty"):
         # What OpenRouter attributes the calls to on its app leaderboard.
+        # Requesty takes the same two.
         headers["HTTP-Referer"] = APP_URL
         headers["X-Title"] = "Dikte"
     return headers
@@ -647,17 +670,19 @@ def transcribe_segments(target, audio_path, language="", prompt="", timeout=300,
 # it is the quickest of them by a wide margin, which is what cleanup wants
 # anyway.
 GEMINI_EFFORT = {"none": "minimal", "xhigh": "high", "max": "high"}
+# Requesty reads OpenAI's flat field and passes OpenRouter's object by, and a
+# "minimal" there is refused with a 400, so it goes to the lowest rung it has.
+REQUESTY_EFFORT = {"minimal": "low"}
 
 
 def _thinking(payload, provider, reasoning):
     """Ask for as much thinking as this provider understands, or for none.
 
     An empty level means "whatever the model does on its own", so nothing is
-    sent. The three mean opposite things by that, which is why the setting is
-    kept per provider: OpenRouter's cleanup models answer straight away, while a
-    local model that was trained to think will think, and a Gemini Flash left to
-    itself thinks too. Cleanup is punctuation rather than a job worth thinking
-    about.
+    sent. Providers mean different things by that: OpenRouter's cleanup models
+    answer straight away, while a local model trained to think, Gemini Flash,
+    and DeepSeek think by default. Cleanup is punctuation rather than a job
+    worth thinking about.
     """
     if not reasoning:
         return
@@ -672,6 +697,17 @@ def _thinking(payload, provider, reasoning):
         # to decide for itself thinks, and thinking about a comma is the second
         # this provider was chosen to save.
         payload["reasoning_effort"] = GEMINI_EFFORT.get(reasoning, reasoning)
+    elif provider == "deepseek":
+        payload["thinking"] = {
+            "type": "disabled" if reasoning == "none" else "enabled"
+        }
+        if reasoning != "none":
+            payload["reasoning_effort"] = {
+                "minimal": "low", "medium": "high", "xhigh": "high",
+            }.get(reasoning, reasoning)
+    elif provider == "requesty":
+        # Explicit Off must remain distinct from the model's default.
+        payload["reasoning_effort"] = REQUESTY_EFFORT.get(reasoning, reasoning)
     elif reasoning != "none":
         # The thinking itself is never shown, so ask for it to be left out.
         payload["reasoning"] = {"effort": reasoning, "exclude": True}
@@ -798,7 +834,9 @@ def chat(messages, api_key, model, system_prompt, reasoning="",
         "model": model,
         "messages": [{"role": "system", "content": system_prompt}] + list(messages),
     }
-    if reasoning:
+    if reasoning and provider == "requesty":
+        _thinking(payload, provider, reasoning)
+    elif reasoning:
         payload["reasoning"] = {"effort": reasoning, "exclude": True}
     try:
         data = _request(
@@ -824,7 +862,7 @@ def chat(messages, api_key, model, system_prompt, reasoning="",
 
 
 def _get_json(url, headers, timeout=20):
-    req = urllib.request.Request(url, headers=headers)
+    req = _authenticated_request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
@@ -877,6 +915,51 @@ def openrouter_models(api_key="", transcription=False):
     return sorted(m["id"] for m in models if m.get("id"))
 
 
+def _model_catalog(payload):
+    """Reject malformed remote catalogs with the error the UI can recover from."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("data", []), list):
+        raise ApiError(t("The provider returned an invalid model catalog."))
+    rows = payload.get("data", [])
+    if any(not isinstance(row, dict)
+           or not isinstance(row.get("id", ""), str) for row in rows):
+        raise ApiError(t("The provider returned an invalid model catalog."))
+    return rows
+
+
+def requesty_models(api_key="", base_url=REQUESTY_URL, transcription=False):
+    """Model ids available on Requesty (no key required).
+
+    The managed policies come first: the short list Requesty keeps of one
+    model each, routed across several providers, which is the list a person
+    picking a cleanup model wants to read. The whole catalog follows, and with
+    a key it is narrowed to what the account is allowed. `transcription` keeps
+    only the speech to text ids, of which the catalog lists none today, so the
+    answer is an empty list rather than several hundred chat models.
+    """
+    headers = {"User-Agent": USER_AGENT}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    base = base_url.rstrip("/")
+    try:
+        catalog = _model_catalog(_get_json(f"{base}/models", headers))
+    except ApiError as exc:
+        raise explain(exc, "Requesty") from None
+    if transcription:
+        return sorted(m["id"] for m in catalog if m.get("id")
+                      and ("transcribe" in m["id"] or "whisper" in m["id"]))
+    try:
+        managed = _model_catalog(_get_json(f"{base}/models/managed", headers))
+    except ApiError:
+        # The catalog alone is still a list worth having.
+        managed = []
+
+    def chat(models):
+        return [m["id"] for m in models
+                if m.get("id") and m.get("api", "chat") == "chat"]
+
+    return list(dict.fromkeys(chat(managed) + sorted(chat(catalog))))
+
+
 # What a `gemini` id can be besides a model that answers a chat request: an
 # embedding, a picture, or a voice. None of them is any use to cleanup.
 NOT_CHAT = ("embedding", "-image", "-tts", "-audio")
@@ -924,6 +1007,6 @@ def openai_models(api_key, base_url=OPENAI_URL, service="OpenAI"):
         )
     except ApiError as exc:
         raise explain(exc, service) from None
-    ids = [m["id"] for m in data.get("data", []) if m.get("id")]
+    ids = [m["id"] for m in _model_catalog(data) if m.get("id")]
     audio = [i for i in ids if "transcribe" in i or "whisper" in i]
     return sorted(audio or ids)

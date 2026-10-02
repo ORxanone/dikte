@@ -42,13 +42,13 @@ def t(text, /, **kwargs):
 _TR_CASES = {
     "dative": {
         "Claude": "Claude'a", "Codex": "Codex'e", "OpenRouter": "OpenRouter'a",
-        "Google AI Studio": "Google AI Studio'ya", "Antigravity": "Antigravity'ye",
-        "OpenCode Go": "OpenCode Go'ya",
+        "Google AI Studio": "Google AI Studio'ya", "DeepSeek": "DeepSeek'e",
+        "Antigravity": "Antigravity'ye", "OpenCode Go": "OpenCode Go'ya", "Requesty": "Requesty'ye",
     },
     "accusative": {
         "Claude": "Claude'u", "Codex": "Codex'i", "OpenRouter": "OpenRouter'ı",
-        "Google AI Studio": "Google AI Studio'yu", "Antigravity": "Antigravity'yi",
-        "OpenCode Go": "OpenCode Go'yu",
+        "Google AI Studio": "Google AI Studio'yu", "DeepSeek": "DeepSeek'i",
+        "Antigravity": "Antigravity'yi", "OpenCode Go": "OpenCode Go'yu", "Requesty": "Requesty'yi",
     },
 }
 
@@ -161,6 +161,8 @@ TR = {
         "{service} hesapta kredi kalmadığını söylüyor (HTTP 402).",
     "{service} is rate limiting you (HTTP 429). Try again in a moment.":
         "{service} hız sınırı uyguluyor (HTTP 429). Birazdan tekrar dene.",
+    "{error} Retrying in {seconds} s ({attempt}/{total})…":
+        "{error} {seconds} sn sonra yeniden deneniyor ({attempt}/{total})…",
     "The {desktop} shortcut is live now, so the built-in listener has "
     "been turned off. It was doubling every key press.":
         "{desktop} kısayolu artık çalışıyor, bu yüzden dahili dinleyici kapatıldı. "
@@ -218,12 +220,15 @@ TR = {
     "Could not connect: {reason}": "Bağlantı kurulamadı: {reason}",
     "Could not parse the response: {error}": "Yanıt çözümlenemedi: {error}",
 
-    "whisper.cpp has no macOS build, and Homebrew's leaves out the server. "
-    "Build whisper-server yourself and give its path here, or transcribe in "
-    "the cloud. See the README.":
-        "whisper.cpp'nin macOS sürümü yok, Homebrew'unki de sunucuyu dışarıda "
-        "bırakıyor. whisper-server'ı kendin derleyip yolunu buraya yaz, ya da "
-        "buluta çevir. README'ye bak.",
+    "whisper.cpp has no macOS build, and Homebrew's leaves out the "
+    "server. Build it (cmake -B build -DWHISPER_BUILD_SERVER=ON "
+    "-DGGML_METAL=ON && cmake --build build -j), put the binary "
+    "on the PATH, or transcribe in the cloud. See the README.":
+        "whisper.cpp'nin macOS için hazır paketi yok; Homebrew paketi de "
+        "sunucuyu içermiyor. Sunucuyu derle (cmake -B build "
+        "-DWHISPER_BUILD_SERVER=ON -DGGML_METAL=ON && cmake --build build -j) "
+        "ve whisper-server dosyasını PATH üzerindeki bir dizine koy "
+        "veya bulutta transkripsiyon yap. README'ye bak.",
 
     # --- settings: tabs and general ------------------------------------
     "Dikte Settings": "Dikte Ayarları",
@@ -309,12 +314,16 @@ TR = {
     "gsk_… (falls back to GROQ_API_KEY)": "gsk_… (boşsa GROQ_API_KEY kullanılır)",
     "sk-or-… (falls back to OPENROUTER_API_KEY)": "sk-or-… (boşsa OPENROUTER_API_KEY kullanılır)",
     "(falls back to GEMINI_API_KEY)": "(boşsa GEMINI_API_KEY kullanılır)",
+    "(falls back to DEEPSEEK_API_KEY)": "(boşsa DEEPSEEK_API_KEY kullanılır)",
     "(falls back to OPENCODE_API_KEY)": "(boşsa OPENCODE_API_KEY kullanılır)",
+    "(falls back to REQUESTY_API_KEY)": "(boşsa REQUESTY_API_KEY kullanılır)",
     "Test": "Test et",
     "Trying…": "Deneniyor…",
     "Runs on OpenRouter.": "OpenRouter üzerinde çalışır.",
     "Runs on Google AI Studio.": "Google AI Studio üzerinde çalışır.",
+    "Runs on DeepSeek.": "DeepSeek üzerinde çalışır.",
     "Runs on OpenCode Go.": "OpenCode Go üzerinde çalışır.",
+    "Runs on Requesty.": "Requesty üzerinde çalışır.",
     "Connection works. {count} audio models visible.":
         "Bağlantı tamam. {count} ses modeli görünüyor.",
     "Connection works. {count} models visible.":
@@ -626,6 +635,17 @@ TR = {
         "Yukarıdaki çalışma dizini ve izinler burada bir şey ifade etmez.",
     "Needs no program installed, only an OpenCode Go key.":
         "Kurulu bir programa değil, yalnızca bir OpenCode Go anahtarına ihtiyaç duyar.",
+    "A plain question and a plain answer, over the Requesty key you already "
+    "have. It runs no commands, opens no files and reaches none of your "
+    "services, so it can tell you what the capital of Peru is but not what is "
+    "in your calendar. Working directory and permissions above mean nothing "
+    "here.":
+        "Elindeki Requesty anahtarı üzerinden düz bir soru ve düz bir cevap. "
+        "Komut çalıştırmaz, dosya açmaz, servislerinin hiçbirine erişmez; yani "
+        "Peru'nun başkentini söyler ama takviminde ne olduğunu söyleyemez. "
+        "Yukarıdaki çalışma dizini ve izinler burada bir şey ifade etmez.",
+    "Needs no program installed, only a Requesty key.":
+        "Kurulu bir programa değil, yalnızca bir Requesty anahtarına ihtiyaç duyar.",
     "Antigravity has neither a permission mode nor a sandbox to hand it, so "
     "what it may do without asking is whatever its own allow-rules say. The "
     "Permissions and Sandbox boxes above belong to the other two; the working "
@@ -1077,6 +1097,7 @@ TR = {
     "The recording stopped on its own; transcribing what was captured.":
         "Kayıt kendi kendine durdu; yakalanan kısım yazıya dökülüyor.",
     "Could not save the settings: {error}": "Ayarlar kaydedilemedi: {error}",
+    "The provider returned an invalid model catalog.": "Sağlayıcı geçersiz bir model listesi döndürdü.",
     # Local processing and verified device selection.
     "A specific graphics card can only be selected with Dikte's managed Vulkan program. Choose Automatic or Processor in Settings.": "Belirli bir ekran kartı yalnızca Dikte'nin yönettiği Vulkan programıyla seçilebilir. Ayarlar'dan Otomatik veya İşlemci'yi seç.",
     "Advanced": "Gelişmiş",
