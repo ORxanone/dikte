@@ -8,6 +8,7 @@ answers by saying nothing at all.
 import json
 import os
 import pathlib
+import plistlib
 import shlex
 import sys
 import unittest
@@ -65,6 +66,61 @@ class Paths(unittest.TestCase):
         path = pathlib.Path(ipc.script_path())
         self.assertEqual(path.parts[-2:], ("dikte", "__main__.py"))
         self.assertTrue(os.path.exists(ipc.script_path()))
+
+    def test_a_macos_bundle_is_recognised_from_its_native_executable(self):
+        with mock.patch.object(sys, "platform", "darwin"), \
+             mock.patch.object(sys, "executable",
+                               "/Applications/Dikte.app/Contents/MacOS/Dikte"), \
+             mock.patch.object(pathlib.Path, "read_bytes", return_value=plistlib.dumps({
+                 "CFBundleIdentifier": "io.github.yusufipk.dikte",
+                 "CFBundleExecutable": "Dikte",
+             })):
+            self.assertEqual(ipc.macos_bundle(), "/Applications/Dikte.app")
+
+    def test_python_app_restarts_with_the_dikte_script(self):
+        executable = "/Library/Frameworks/Python.framework/Resources/Python.app/Contents/MacOS/Python"
+        with mock.patch.object(sys, "platform", "darwin"), \
+             mock.patch.object(sys, "executable", executable), \
+             mock.patch.object(sys, "frozen", False, create=True), \
+             mock.patch.object(pathlib.Path, "read_bytes", return_value=plistlib.dumps({
+                 "CFBundleIdentifier": "org.python.python",
+                 "CFBundleExecutable": "Python",
+             })), \
+             mock.patch.object(ipc.os, "execv") as execv, \
+             mock.patch.object(ipc.subprocess, "Popen") as popen:
+            self.assertIsNone(ipc.macos_bundle())
+            ipc.respawn(["--gui"])
+            execv.assert_called_once_with(executable, [executable, ipc.script_path(), "--gui"])
+            popen.assert_not_called()
+
+    def test_missing_or_invalid_bundle_metadata_is_not_a_dikte_bundle(self):
+        with mock.patch.object(sys, "platform", "darwin"), \
+             mock.patch.object(sys, "executable", "/Applications/Dikte.app/Contents/MacOS/Dikte"):
+            for error in (FileNotFoundError(), ValueError()):
+                with self.subTest(error=type(error).__name__), \
+                     mock.patch.object(pathlib.Path, "read_bytes", side_effect=error):
+                    self.assertIsNone(ipc.macos_bundle())
+            for metadata in ([], {"CFBundleIdentifier": "io.github.yusufipk.dikte", "CFBundleExecutable": "other"}):
+                with self.subTest(metadata=metadata), \
+                     mock.patch.object(pathlib.Path, "read_bytes", return_value=plistlib.dumps(metadata)):
+                    self.assertIsNone(ipc.macos_bundle())
+
+    def test_truncated_xml_metadata_is_not_a_dikte_bundle(self):
+        with mock.patch.object(sys, "platform", "darwin"), \
+             mock.patch.object(sys, "executable", "/Applications/Dikte.app/Contents/MacOS/Dikte"), \
+             mock.patch.object(pathlib.Path, "read_bytes", return_value=b'<?xml version="1.0"?><plist><dict>'):
+            self.assertIsNone(ipc.macos_bundle())
+
+    def test_a_plain_macos_python_is_not_an_application_bundle(self):
+        with mock.patch.object(sys, "platform", "darwin"), \
+             mock.patch.object(sys, "executable", "/opt/homebrew/bin/python3"):
+            self.assertIsNone(ipc.macos_bundle())
+
+    def test_other_platforms_do_not_claim_a_macos_bundle(self):
+        with mock.patch.object(sys, "platform", "linux"), \
+             mock.patch.object(sys, "executable",
+                               "/Applications/Dikte.app/Contents/MacOS/Dikte"):
+            self.assertIsNone(ipc.macos_bundle())
 
     def test_the_shortcut_command_runs_it_with_this_interpreter(self):
         # Read back through the same quoting it went out with: a Windows path
@@ -238,8 +294,22 @@ class InstanceLock(DikteTest):
 
 
 class Respawn(unittest.TestCase):
+    def test_a_macos_bundle_restarts_through_launchservices_and_returns(self):
+        with mock.patch.object(ipc, "macos_bundle",
+                               return_value="/Applications/Dikte.app"), \
+                mock.patch.object(ipc.subprocess, "Popen") as popen, \
+                mock.patch.object(ipc.os, "execv") as execv:
+            ipc.respawn(["--gui"])
+        popen.assert_called_once_with(
+            ["/usr/bin/open", "-n", "-a", "/Applications/Dikte.app",
+             "--args", "--gui"],
+            close_fds=True,
+        )
+        execv.assert_not_called()
+
     def test_windows_starts_a_detached_process_and_returns(self):
-        with mock.patch.object(sys, "platform", "win32"), \
+        with mock.patch.object(ipc, "macos_bundle", return_value=None), \
+                mock.patch.object(sys, "platform", "win32"), \
                 mock.patch.object(ipc, "launcher", return_value=["py", "x"]), \
                 mock.patch.object(ipc.subprocess, "Popen") as popen:
             ipc.respawn(["--gui"])
@@ -248,7 +318,8 @@ class Respawn(unittest.TestCase):
                          0x00000008 | 0x00000200)
 
     def test_everywhere_else_the_process_is_replaced(self):
-        with mock.patch.object(sys, "platform", "linux"), \
+        with mock.patch.object(ipc, "macos_bundle", return_value=None), \
+                mock.patch.object(sys, "platform", "linux"), \
                 mock.patch.object(ipc, "launcher", return_value=["py", "x"]), \
                 mock.patch.object(ipc.os, "execv") as execv:
             ipc.respawn(["toggle", "--gui"])
