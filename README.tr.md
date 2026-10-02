@@ -115,22 +115,25 @@ demedikçe ayarlarına ve diktelerine dokunmaz. Dikte sürüm sayfasına günde 
 kez bakar ve yeni sürüm çıkmışsa tepsi menüsüne bir satır koyar; o satır bir şey
 kurmaz, sayfayı açar. Genel sekmesi bu denetimi kapatır ya da anında çalıştırır.
 
-Sesi yazıya çevirme ve temizleme, ayarlar penceresinde ayrı ayrı sağlayıcı
-seçer; ikisi de varsayılan olarak burada, kendi modellerinle çalışır. Bulutu
-seçersen sesi yazıya çevirme **OpenAI**, **Groq**, **OpenRouter** ya da
-**Requesty**'de (varsayılan `gpt-4o-transcribe`); temizleme OpenRouter veya
-Requesty'de (`google/gemini-3.5-flash-lite`), **Google AI Studio**'da
-(`gemini-3.5-flash-lite`), **DeepSeek**'te (`deepseek-flash`), **OpenCode Go**'da
-(`deepseek-v4-flash`) ya da kuruluysa Claude Code, Codex veya Antigravity'de
-çalışır. Beş bulut temizleme sağlayıcısı tek bir HTTP isteği kullanır; üç CLI
-ise bunun için birer oturum açar. Anahtarları boş bırakırsan `OPENAI_API_KEY`,
-`GROQ_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`,
-`OPENCODE_API_KEY` ve `REQUESTY_API_KEY` kullanılır. Anahtarlar
-`~/.config/dikte/config.json` içinde, izinler 600, Mac'te ise
-`~/Library/Application Support/Dikte` altında tutulur.
-Temizlemeyi tamamen kapatabilirsin, o zaman ham transkript yapıştırılır; modelin
-yanındaki kutudan düşünme seviyesini de seçebilirsin. `requesty_base_url`
-`https://router.eu.requesty.ai/v1` yapılırsa Requesty istekleri AB içinde tutar.
+Sesi yazıya çevirme ve temizleme sağlayıcılarını Ayarlar'dan ayrı ayrı seç.
+Sesi yazıya çevirme varsayılan olarak yerelde, temizleme ise bulutta çalışır.
+Temizleme için yerel bir model veya kurulu bir CLI da kullanabilirsin.
+Temizlemeyi kapatırsan ham transkript yapıştırılır.
+
+| İşlem | Bulut sağlayıcıları | Diğer seçenekler |
+| --- | --- | --- |
+| Sesi yazıya çevirme | OpenAI, Groq, OpenRouter, Requesty | Yerel model |
+| Temizleme | OpenRouter, Requesty, Google AI Studio, DeepSeek, OpenCode Go | Yerel model; Claude Code, Codex veya Antigravity CLI |
+
+Modelleri ve temizleme için düşünme seviyesini Ayarlar'dan seçebilirsin. API
+anahtarlarını da buraya girebilirsin; boş bırakılan anahtarlar için
+`OPENAI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`, `REQUESTY_API_KEY`,
+`GEMINI_API_KEY`, `DEEPSEEK_API_KEY` ve `OPENCODE_API_KEY` kullanılır.
+
+Ayarlar ve uygulamaya girdiğin anahtarlar `config.json` dosyasına kaydedilir:
+Linux'ta `~/.config/dikte` (tanımlıysa `$XDG_CONFIG_HOME/dikte`), macOS'ta
+`~/Library/Application Support/Dikte`, Windows'ta `%APPDATA%\Dikte` altında.
+Linux ve macOS'ta dosya 600 izinleriyle yazılır.
 
 ## Kullanım
 
