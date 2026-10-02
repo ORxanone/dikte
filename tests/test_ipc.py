@@ -8,6 +8,7 @@ answers by saying nothing at all.
 import json
 import os
 import pathlib
+import plistlib
 import shlex
 import sys
 import unittest
@@ -69,8 +70,46 @@ class Paths(unittest.TestCase):
     def test_a_macos_bundle_is_recognised_from_its_native_executable(self):
         with mock.patch.object(sys, "platform", "darwin"), \
              mock.patch.object(sys, "executable",
-                               "/Applications/Dikte.app/Contents/MacOS/Dikte"):
+                               "/Applications/Dikte.app/Contents/MacOS/Dikte"), \
+             mock.patch.object(pathlib.Path, "read_bytes", return_value=plistlib.dumps({
+                 "CFBundleIdentifier": "io.github.yusufipk.dikte",
+                 "CFBundleExecutable": "Dikte",
+             })):
             self.assertEqual(ipc.macos_bundle(), "/Applications/Dikte.app")
+
+    def test_python_app_restarts_with_the_dikte_script(self):
+        executable = "/Library/Frameworks/Python.framework/Resources/Python.app/Contents/MacOS/Python"
+        with mock.patch.object(sys, "platform", "darwin"), \
+             mock.patch.object(sys, "executable", executable), \
+             mock.patch.object(sys, "frozen", False, create=True), \
+             mock.patch.object(pathlib.Path, "read_bytes", return_value=plistlib.dumps({
+                 "CFBundleIdentifier": "org.python.python",
+                 "CFBundleExecutable": "Python",
+             })), \
+             mock.patch.object(ipc.os, "execv") as execv, \
+             mock.patch.object(ipc.subprocess, "Popen") as popen:
+            self.assertIsNone(ipc.macos_bundle())
+            ipc.respawn(["--gui"])
+            execv.assert_called_once_with(executable, [executable, ipc.script_path(), "--gui"])
+            popen.assert_not_called()
+
+    def test_missing_or_invalid_bundle_metadata_is_not_a_dikte_bundle(self):
+        with mock.patch.object(sys, "platform", "darwin"), \
+             mock.patch.object(sys, "executable", "/Applications/Dikte.app/Contents/MacOS/Dikte"):
+            for error in (FileNotFoundError(), ValueError()):
+                with self.subTest(error=type(error).__name__), \
+                     mock.patch.object(pathlib.Path, "read_bytes", side_effect=error):
+                    self.assertIsNone(ipc.macos_bundle())
+            for metadata in ([], {"CFBundleIdentifier": "io.github.yusufipk.dikte", "CFBundleExecutable": "other"}):
+                with self.subTest(metadata=metadata), \
+                     mock.patch.object(pathlib.Path, "read_bytes", return_value=plistlib.dumps(metadata)):
+                    self.assertIsNone(ipc.macos_bundle())
+
+    def test_truncated_xml_metadata_is_not_a_dikte_bundle(self):
+        with mock.patch.object(sys, "platform", "darwin"), \
+             mock.patch.object(sys, "executable", "/Applications/Dikte.app/Contents/MacOS/Dikte"), \
+             mock.patch.object(pathlib.Path, "read_bytes", return_value=b'<?xml version="1.0"?><plist><dict>'):
+            self.assertIsNone(ipc.macos_bundle())
 
     def test_a_plain_macos_python_is_not_an_application_bundle(self):
         with mock.patch.object(sys, "platform", "darwin"), \

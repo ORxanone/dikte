@@ -11,9 +11,11 @@ shortcut may still send.
 import json
 import os
 import pathlib
+import plistlib
 import shlex
 import subprocess
 import sys
+from xml.parsers.expat import ExpatError
 
 from PyQt6.QtCore import QLockFile
 from PyQt6.QtNetwork import QLocalSocket
@@ -53,7 +55,16 @@ def macos_bundle():
     bundle = contents.parent
     if (macos.name == "MacOS" and contents.name == "Contents"
             and bundle.suffix == ".app"):
-        return str(bundle)
+        try:
+            metadata = plistlib.loads(pathlib.Path(contents / "Info.plist").read_bytes())
+        except (OSError, ValueError, ExpatError):
+            return None
+        # Homebrew's Python.app has the same directory shape. Only our
+        # application identity may be relaunched without a script argument.
+        if (isinstance(metadata, dict)
+                and metadata.get("CFBundleIdentifier") == "io.github.yusufipk.dikte"
+                and metadata.get("CFBundleExecutable") == executable.name):
+            return str(bundle)
     return None
 
 
