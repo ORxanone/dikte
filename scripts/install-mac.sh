@@ -141,6 +141,15 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # main() can show a useful reinstall message.
 PY_HOME="$("$PY" -c 'import sys; print(sys.base_prefix)')"
 PY_SITE="$("$PY" -c 'import site; print(site.getsitepackages()[0])')"
+
+# Paths become shell source in the wrappers below; quote them as literals.
+shell_literal() {
+    "$PY" -c 'import shlex, sys; print(shlex.quote(sys.argv[1]))' "$1"
+}
+SHELL_PY="$(shell_literal "$PY")"
+SHELL_ENTRY="$(shell_literal "$ENTRY")"
+SHELL_PY_HOME="$(shell_literal "$PY_HOME")"
+SHELL_PY_SITE="$(shell_literal "$PY_SITE")"
 # Only a framework or a shared libpython can be loaded at runtime. A static
 # CPython (pyenv's default, or any build without --enable-shared) reports a
 # libpython3.x.a here; that file exists, so a bare stat() would pass, but
@@ -294,15 +303,15 @@ if [ $COMPILED_NATIVE -eq 0 ]; then
 #!/bin/sh
 # Written by install-mac.sh. Edit that, not this.
 HERE=\$(cd "\$(dirname "\$0")" && pwd)
-export PYTHONHOME="$PY_HOME"
-export PYTHONPATH="$PY_SITE"
+export PYTHONHOME=$SHELL_PY_HOME
+export PYTHONPATH=$SHELL_PY_SITE
 # Started from the Finder there is no terminal to print to, so the one thing
 # that can go wrong on its own says so in a dialog.
 if [ ! -d "\$PYTHONHOME" ]; then
   osascript -e 'display alert "Dikte" message "The Python this was installed against is gone, most likely after a brew upgrade. Run ./install.sh again."' >/dev/null 2>&1
   exit 1
 fi
-exec "\$HERE/python3" "$ENTRY" --gui "\$@"
+exec "\$HERE/python3" $SHELL_ENTRY --gui "\$@"
 EOF
 fi
 chmod +x "$APP/Contents/MacOS/Dikte"
@@ -378,7 +387,7 @@ mkdir -p "$BIN_DIR"
 cat > "$BIN_DIR/dikte" <<EOF
 #!/bin/sh
 # Written by install-mac.sh. Edit that, not this.
-exec "$PY" "$ENTRY" "\$@"
+exec $SHELL_PY $SHELL_ENTRY "\$@"
 EOF
 chmod +x "$BIN_DIR/dikte" "$ENTRY"
 ok "Command installed: $BIN_DIR/dikte"

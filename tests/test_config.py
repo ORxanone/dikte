@@ -191,6 +191,8 @@ class Keys(DikteTest):
             self.assertEqual(cfg.Config().gemini_key(), "AIza-env")
         with mock.patch.dict(os.environ, {"OPENCODE_API_KEY": "opencode-env"}):
             self.assertEqual(cfg.Config().opencode_key(), "opencode-env")
+        with mock.patch.dict(os.environ, {"REQUESTY_API_KEY": "rqsty-env"}):
+            self.assertEqual(cfg.Config().requesty_key(), "rqsty-env")
 
 
 class TranscribeTarget(DikteTest):
@@ -221,6 +223,16 @@ class TranscribeTarget(DikteTest):
         self.assertEqual(target.api_key, "sk-or-test")
         self.assertEqual(target.model, "openai/whisper-1")
         self.assertEqual(target.file_model, "")
+
+    def test_requesty_when_it_is_picked(self):
+        conf = self.config(transcribe_provider="requesty",
+                           requesty_api_key="rqsty-test")
+        target = conf.transcribe_target()
+        self.assertEqual(target.provider, "requesty")
+        self.assertEqual(target.service, "Requesty")
+        self.assertEqual(target.api_key, "rqsty-test")
+        self.assertEqual(target.base_url, "https://router.requesty.ai/v1")
+        self.assertEqual(target.model, "openai/gpt-4o-transcribe")
 
     def test_openrouter_carries_its_file_model(self):
         conf = self.config(transcribe_provider="openrouter",
@@ -604,18 +616,35 @@ class Defaults(unittest.TestCase):
         self.assertEqual(cfg.DEFAULTS["openai_api_key"], "")
         self.assertEqual(cfg.DEFAULTS["openrouter_api_key"], "")
         self.assertEqual(cfg.DEFAULTS["gemini_api_key"], "")
+        self.assertEqual(cfg.DEFAULTS["deepseek_api_key"], "")
         self.assertEqual(cfg.DEFAULTS["opencode_api_key"], "")
+        self.assertEqual(cfg.DEFAULTS["requesty_api_key"], "")
 
     def test_google_ai_studio_is_a_cleanup_provider_and_not_a_transcriber(self):
         """Its compatible endpoint has no /audio/transcriptions behind it."""
         self.assertNotIn("gemini", cfg.TRANSCRIBERS)
         self.assertIn("gemini", cleanup.PROVIDERS)
 
+    def test_deepseek_is_a_cleanup_provider_and_not_a_transcriber(self):
+        self.assertNotIn("deepseek", cfg.TRANSCRIBERS)
+        self.assertIn("deepseek", cleanup.PROVIDERS)
+        self.assertEqual(cfg.DEFAULTS["deepseek_base_url"],
+                         "https://api.deepseek.com")
+        self.assertEqual(cfg.DEFAULTS["cleanup_deepseek_model"], "deepseek-flash")
+
     def test_opencode_ships_on_its_own_endpoint(self):
         self.assertEqual(cfg.DEFAULTS["opencode_base_url"],
                          "https://opencode.ai/zen/go/v1")
         self.assertEqual(cfg.DEFAULTS["cleanup_opencode_model"], "deepseek-v4-flash")
         self.assertEqual(cfg.DEFAULTS["assistant_opencode_model"], "deepseek-v4-flash")
+
+    def test_requesty_ships_on_its_own_endpoint_and_is_never_the_default(self):
+        self.assertEqual(cfg.DEFAULTS["requesty_base_url"],
+                         "https://router.requesty.ai/v1")
+        self.assertIn("requesty", cfg.TRANSCRIBERS)
+        self.assertNotEqual(cfg.DEFAULTS["transcribe_provider"], "requesty")
+        self.assertNotEqual(cfg.DEFAULTS["cleanup_provider"], "requesty")
+        self.assertNotEqual(cfg.DEFAULTS["assistant_provider"], "requesty")
 
     def test_every_language_specific_prompt_has_both_languages(self):
         for name in ("CLEANUP_PROMPT", "FILE_CLEANUP_PROMPT", "MEETING_PROMPT",

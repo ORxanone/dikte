@@ -20,6 +20,7 @@ import zipfile
 from unittest import mock
 
 from dikte import ggml
+from dikte import i18n
 from dikte import hub
 from tests.support import (DikteTest, fake_urlopen, http_error, json_body,
                            linux_only, url_error)
@@ -415,7 +416,21 @@ class InstallProgram(Local):
         with fake_urlopen(listing):
             with self.assertRaises(ggml.LocalError) as caught:
                 ggml.install_program(ggml.WHISPER)
-        self.assertIn("Build whisper-server yourself", str(caught.exception))
+        self.assertIn("Build it (cmake", str(caught.exception))
+        self.assertIn("put the binary on the PATH", str(caught.exception))
+
+    def test_the_macos_download_guidance_is_localized_and_names_path(self):
+        self.patch_attr(sys, "platform", "darwin")
+        self.patch_attr(ggml, "_arch", lambda: "arm64")
+        for language, expected in (("en", "put the binary on the PATH"),
+                                   ("tr", "PATH üzerindeki bir dizine koy")):
+            with self.subTest(language=language):
+                i18n.set_language(language)
+                with fake_urlopen(self.release("whisper-bin-ubuntu-arm64.tar.gz")):
+                    with self.assertRaises(ggml.LocalError) as caught:
+                        ggml.install_program(ggml.WHISPER)
+                self.assertIn(expected, str(caught.exception))
+                self.assertIn("-DWHISPER_BUILD_SERVER=ON", str(caught.exception))
 
     def test_a_mac_uses_the_native_llama_archive_instead_of_ubuntu(self):
         self.patch_attr(sys, "platform", "darwin")

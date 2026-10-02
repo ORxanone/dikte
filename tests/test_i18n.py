@@ -81,6 +81,7 @@ class Names(DikteTest):
         self.assertEqual(i18n.name("Claude", "dative"), "Claude'a")
         self.assertEqual(i18n.name("Codex", "dative"), "Codex'e")
         self.assertEqual(i18n.name("OpenRouter", "accusative"), "OpenRouter'ı")
+        self.assertEqual(i18n.name("Requesty", "dative"), "Requesty'ye")
 
     def test_no_case_asked_for(self):
         i18n.set_language("tr")
