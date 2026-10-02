@@ -618,7 +618,7 @@ def install_program(program, tag="", on_progress=None, should_stop=None,
         # publishes no macOS binary, and Homebrew's whisper-cpp is configured
         # with WHISPER_BUILD_SERVER=OFF, so it is whisper-cli that lands and not
         # the server Dikte talks to. Building it is a cmake line, and the
-        # binary is picked up from the PATH or from the box above, the same way
+        # binary is picked up from the PATH, the same way
         # a distribution's own build is on Linux.
         if sys.platform == "darwin" and program is WHISPER:
             raise LocalError(t(

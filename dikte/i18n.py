@@ -218,12 +218,15 @@ TR = {
     "Could not connect: {reason}": "Bağlantı kurulamadı: {reason}",
     "Could not parse the response: {error}": "Yanıt çözümlenemedi: {error}",
 
-    "whisper.cpp has no macOS build, and Homebrew's leaves out the server. "
-    "Build whisper-server yourself and give its path here, or transcribe in "
-    "the cloud. See the README.":
-        "whisper.cpp'nin macOS sürümü yok, Homebrew'unki de sunucuyu dışarıda "
-        "bırakıyor. whisper-server'ı kendin derleyip yolunu buraya yaz, ya da "
-        "buluta çevir. README'ye bak.",
+    "whisper.cpp has no macOS build, and Homebrew's leaves out the "
+    "server. Build it (cmake -B build -DWHISPER_BUILD_SERVER=ON "
+    "-DGGML_METAL=ON && cmake --build build -j), put the binary "
+    "on the PATH, or transcribe in the cloud. See the README.":
+        "whisper.cpp'nin macOS için hazır paketi yok; Homebrew paketi de "
+        "sunucuyu içermiyor. Sunucuyu derle (cmake -B build "
+        "-DWHISPER_BUILD_SERVER=ON -DGGML_METAL=ON && cmake --build build -j) "
+        "ve whisper-server dosyasını PATH üzerindeki bir dizine koy "
+        "veya bulutta transkripsiyon yap. README'ye bak.",
 
     # --- settings: tabs and general ------------------------------------
     "Dikte Settings": "Dikte Ayarları",
