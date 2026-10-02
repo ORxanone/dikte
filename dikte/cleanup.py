@@ -1,12 +1,12 @@
 """Who rewrites the transcript once it has been heard.
 
 Normally a small model over one HTTP request: a second, and a few tenths of a
-cent on OpenRouter or nothing at all on Google AI Studio's free tier. A machine
-with Claude Code, Codex or Antigravity on it is already paying for a model
-though, and the subscription that answers "put that in my calendar on Thursday"
-can just as well take the "eee"s out of a sentence. No second key, no second
-bill. It costs seconds rather than one, because a CLI opens a whole session to
-do it, which is the trade.
+cent on OpenRouter or DeepSeek, or nothing at all on Google AI Studio's free
+tier. A machine with Claude Code, Codex or Antigravity on it is already paying
+for a model though, and the subscription that answers "put that in my calendar
+on Thursday" can just as well take the "eee"s out of a sentence. No second key,
+no second bill. It costs seconds rather than one, because a CLI opens a whole
+session to do it, which is the trade.
 
 Whoever does it, the job is the same one: no tools, no files, no memory of the
 last dictation. There is nothing here to look up and nothing to carry over, and
@@ -29,7 +29,8 @@ from . import ggml
 from . import paths
 from .i18n import t
 
-PROVIDERS = ("openrouter", "gemini", "opencode", "local", "claude", "codex", "agy")
+PROVIDERS = ("openrouter", "requesty", "gemini", "deepseek", "opencode", "local", "claude",
+             "codex", "agy")
 
 
 class CleanupError(api.ApiError):
@@ -67,8 +68,12 @@ def model(conf):
         return conf["cleanup_agy_model"].strip() or "agy"
     if name == "gemini":
         return conf["cleanup_gemini_model"]
+    if name == "deepseek":
+        return conf["cleanup_deepseek_model"]
     if name == "opencode":
         return conf["cleanup_opencode_model"]
+    if name == "requesty":
+        return conf["cleanup_requesty_model"]
     return conf["cleanup_model"]
 
 
@@ -93,12 +98,26 @@ def run(text, conf, system_prompt, timeout=180, aborter=None):
             base_url=conf["gemini_base_url"], timeout=timeout,
             provider="gemini", service="Google AI Studio", aborter=aborter,
         )
+    if name == "deepseek":
+        return api.cleanup(
+            text, conf.deepseek_key(), conf["cleanup_deepseek_model"], system_prompt,
+            reasoning=conf["cleanup_reasoning"],
+            base_url=conf["deepseek_base_url"], timeout=timeout,
+            provider="deepseek", service="DeepSeek", aborter=aborter,
+        )
     if name == "opencode":
         return api.cleanup(
             text, conf.opencode_key(), conf["cleanup_opencode_model"], system_prompt,
             reasoning=conf["cleanup_reasoning"],
             base_url=conf["opencode_base_url"], timeout=timeout,
             provider="opencode", service="OpenCode Go", aborter=aborter,
+        )
+    if name == "requesty":
+        return api.cleanup(
+            text, conf.requesty_key(), conf["cleanup_requesty_model"], system_prompt,
+            reasoning=conf["cleanup_reasoning"],
+            base_url=conf["requesty_base_url"], timeout=timeout,
+            provider="requesty", service="Requesty", aborter=aborter,
         )
     if name == "local":
         return _local(text, conf, system_prompt, timeout, aborter)

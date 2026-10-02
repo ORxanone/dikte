@@ -479,6 +479,8 @@ class HomeWindow(QWidget):
         binary = assistant.executable(provider)
         if binary:
             return bool(shutil.which(binary))
+        if provider == "requesty":
+            return bool(self.conf.requesty_key())
         return bool(self.conf.opencode_key() if provider == "opencode" else self.conf.openrouter_key())
 
     def _capture(self):
