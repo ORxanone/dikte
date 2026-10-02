@@ -118,23 +118,25 @@ once a day and puts a line in the tray menu when a newer version is out, which
 opens the page rather than installing anything; the General tab turns that off
 or runs it on the spot.
 
-Speech to text and cleanup each pick a provider in the settings window, and both
-run here by default, on models of your own. The cloud is the other option:
-speech to text on **OpenAI**, **Groq**, **OpenRouter** or **Requesty**
-(`gpt-4o-transcribe`); cleanup on OpenRouter or Requesty
-(`google/gemini-3.5-flash-lite`), **Google AI Studio**
-(`gemini-3.5-flash-lite`), **DeepSeek** (`deepseek-flash`), **OpenCode Go**
-(`deepseek-v4-flash`) or, when installed, Claude Code, Codex or Antigravity.
-The five hosted cleanup providers use one HTTP request; the three CLIs each
-open a whole session, which is where their few extra seconds go. Keys fall
-back to `OPENAI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`,
-`GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY` and `REQUESTY_API_KEY`,
-and are stored in
-`~/.config/dikte/config.json`, mode 600, or in
-`~/Library/Application Support/Dikte` on a Mac. Cleanup can be switched off, in
-which case the raw transcript is pasted, and a thinking model's effort can be
-set next to it. Requesty keeps requests in the EU when `requesty_base_url` is set
-to `https://router.eu.requesty.ai/v1`.
+Choose speech-to-text and cleanup providers separately in Settings. Speech to
+text runs locally by default; cleanup uses a hosted provider by default, but
+can also run on a local model or through an installed CLI. Turn cleanup off to
+paste the raw transcript.
+
+| Task | Hosted providers | Other options |
+| --- | --- | --- |
+| Speech to text | OpenAI, Groq, OpenRouter, Requesty | Local model |
+| Cleanup | OpenRouter, Requesty, Google AI Studio, DeepSeek, OpenCode Go | Local model; Claude Code, Codex or Antigravity CLI |
+
+Choose models and cleanup reasoning effort in Settings. API keys can be entered
+there too; empty keys fall back to `OPENAI_API_KEY`, `GROQ_API_KEY`,
+`OPENROUTER_API_KEY`, `REQUESTY_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`
+and `OPENCODE_API_KEY`.
+
+Settings and any keys entered in the app are saved in `config.json`: under
+`~/.config/dikte` on Linux (or `$XDG_CONFIG_HOME/dikte` when set),
+`~/Library/Application Support/Dikte` on macOS, and `%APPDATA%\Dikte` on
+Windows. On Linux and macOS, the file is written with mode 600.
 
 ## Using it
 
