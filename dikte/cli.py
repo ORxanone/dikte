@@ -571,6 +571,18 @@ def cmd_config_get(opts):
                else value)
 
 
+def _set_config_value(conf, key, value):
+    """Keep the canonical processing device and its legacy flag in sync."""
+    conf[key] = value
+    if key == "local_device":
+        conf["local_gpu"] = value != "cpu"
+    elif key == "local_gpu":
+        if not value:
+            conf["local_device"] = "cpu"
+        elif conf["local_device"] == "cpu":
+            conf["local_device"] = "auto"
+
+
 def cmd_config_set(opts):
     if opts.key not in cfg.DEFAULTS:
         return fail(opts, f"unknown setting: {opts.key}", 2)
@@ -585,7 +597,7 @@ def cmd_config_set(opts):
         return fail(opts, exc, 2)
 
     conf = cfg.Config()
-    conf[opts.key] = value
+    _set_config_value(conf, opts.key, value)
     try:
         conf.save()
     except OSError as exc:
@@ -606,7 +618,7 @@ def cmd_config_reset(opts):
         return fail(opts, f"unknown setting: {unknown[0]}", 2)
     conf = cfg.Config()
     for key in keys:
-        conf[key] = cfg.DEFAULTS[key]
+        _set_config_value(conf, key, cfg.DEFAULTS[key])
     try:
         conf.save()
     except OSError as exc:
