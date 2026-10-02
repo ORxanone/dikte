@@ -250,8 +250,24 @@ def explain(exc, service):
     return ApiError(f"{service}: {exc}", exc.status, retryable=exc.retryable)
 
 
+def _authenticated_request(url, data=None, headers=None, method=None):
+    """Send credentials only to the explicitly configured endpoint.
+
+    urllib copies ordinary headers to redirected requests, including across
+    hosts and HTTPS downgrades. Unredirected headers reach the first endpoint
+    only, in both the normal and cancellable request paths.
+    """
+    request = urllib.request.Request(url, data=data, method=method)
+    for name, value in (headers or {}).items():
+        if name.lower() == "authorization":
+            request.add_unredirected_header(name, value)
+        else:
+            request.add_header(name, value)
+    return request
+
+
 def _request(url, data, headers, timeout=120, aborter=None):
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    req = _authenticated_request(url, data=data, headers=headers, method="POST")
     try:
         with _opened(req, timeout, aborter) as resp:
             return json.loads(resp.read().decode("utf-8"))
@@ -824,7 +840,7 @@ def chat(messages, api_key, model, system_prompt, reasoning="",
 
 
 def _get_json(url, headers, timeout=20):
-    req = urllib.request.Request(url, headers=headers)
+    req = _authenticated_request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
