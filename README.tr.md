@@ -95,7 +95,8 @@ Orada elle derlenmesi gereken tek parça yerel transkripsiyon: whisper.cpp'nin
 macOS sürümü yok, Homebrew'unki de `WHISPER_BUILD_SERVER=OFF` ile derleniyor,
 yani `whisper-cli` kuruluyor, Dikte'nin konuştuğu sunucu değil. Kendin derle
 (`cmake -B build -DWHISPER_BUILD_SERVER=ON -DGGML_METAL=ON && cmake --build
-build -j`) ve yolunu Ayarlar → API'ye yaz, ya da buluta çevir. Toplantı için
+build -j`) ve `build/bin/whisper-server` dosyasını `PATH` üzerindeki bir dizine koy,
+ya da buluta çevir. Toplantı için
 BlackHole veya Loopback gerekiyor (`brew install blackhole-2ch`); dikte için
 gerekmiyor.
 

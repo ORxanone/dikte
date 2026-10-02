@@ -97,7 +97,7 @@ Local speech to text is the one piece that has to be built by hand there:
 whisper.cpp publishes no macOS binary and Homebrew's is configured with
 `WHISPER_BUILD_SERVER=OFF`, so it installs `whisper-cli` and not the server
 Dikte talks to. Build it (`cmake -B build -DWHISPER_BUILD_SERVER=ON
--DGGML_METAL=ON && cmake --build build -j`) and give Settings → API the path, or
+-DGGML_METAL=ON && cmake --build build -j`) and put `build/bin/whisper-server` in a directory on your `PATH`, or
 transcribe in the cloud. A meeting needs BlackHole or Loopback
 (`brew install blackhole-2ch`); dictation does not.
 
