@@ -26,7 +26,7 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   # by install-mac.sh names it, so it is read back out of there.
   # `|| true` because there may be no wrapper to read: pipefail would otherwise
   # make a missing file the end of the script rather than a question answered no.
-  PY="$(sed -n 's/^exec "\([^"]*\)".*/\1/p' "$BIN_DIR/dikte" 2>/dev/null | head -1 || true)"
+  PY="$(python3 -c 'import os, pathlib, shlex, sys; words = shlex.split(os.fsdecode(pathlib.Path(sys.argv[1]).read_bytes()), comments=True); print(words[words.index("exec") + 1])' "$BIN_DIR/dikte" 2>/dev/null || true)"
   [[ -x "$PY" ]] || PY="$(command -v python3 || true)"
 else
   MACOS=0

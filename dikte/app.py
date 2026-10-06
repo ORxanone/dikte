@@ -35,7 +35,7 @@ if sys.platform == "darwin":
     )
 
 from PyQt6.QtCore import (QObject, QTimer, QElapsedTimer, QSocketNotifier,  # noqa: E402
-                          QUrl, pyqtSignal)
+                          Qt, QUrl, pyqtSignal)
 from PyQt6.QtGui import QAction, QDesktopServices, QIcon  # noqa: E402
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon  # noqa: E402
@@ -56,7 +56,7 @@ from . import trayicon  # noqa: E402
 from . import update  # noqa: E402
 from .i18n import t  # noqa: E402
 from .meeting import MeetingPipeline  # noqa: E402
-from .overlay import Overlay  # noqa: E402
+from .overlay import Overlay, active_screen  # noqa: E402
 from .settings_ui import SettingsWindow  # noqa: E402
 from .home_ui import HomeWindow  # noqa: E402
 from .worker import Pipeline  # noqa: E402
@@ -1312,9 +1312,7 @@ class Dikte:
             self._make_settings()
         if getattr(self, "home_window", None) is None:
             self.home_window = HomeWindow(self, self.settings_window)
-        self.home_window.show()
-        self.home_window.raise_()
-        self.home_window.activateWindow()
+        _present(self.home_window)
 
     def open_settings(self):
         if self.settings_window is None:
@@ -1322,9 +1320,7 @@ class Dikte:
         else:
             self.settings_window.refresh_configuration()
             self.settings_window.refresh_sources()
-        self.settings_window.show()
-        self.settings_window.raise_()
-        self.settings_window.activateWindow()
+        _present(self.settings_window)
 
     def _make_settings(self):
         """Build the window without showing it, so a caller that knows where
@@ -1477,8 +1473,8 @@ class Dikte:
         if self.instance_lock is not None:
             self.instance_lock.unlock()
         ipc.respawn(["--gui"])
-        # respawn only returns on Windows, where the replacement was started
-        # detached and this process still has to leave on its own.
+        # respawn returns where the replacement starts separately: detached on
+        # Windows, or through LaunchServices for a macOS application bundle.
         QApplication.instance().quit()
 
     def shutdown(self):
@@ -1519,8 +1515,43 @@ def _clock(seconds):
             else f"{minutes}:{secs:02d}")
 
 
+def _present(window):
+    """Show a window where the user is now, raised and focused.
+
+    A window that was shown once keeps its position when it is shown again,
+    and one left open stays on the virtual desktop it was left on, so opening
+    Dikte from the tray would bring it up on the other monitor or pull the
+    user over to another desktop. One that is open but not the active window
+    is taken down first, which the window manager answers by mapping it again
+    on the current desktop, and one on another screen is centred on this one.
+    A Wayland compositor places windows itself and ignores the move, which is
+    why the application runs through XWayland there (see the top of the file).
+    """
+    if window.isVisible() and not window.isActiveWindow():
+        window.hide()
+    if window.isMinimized():
+        window.setWindowState(window.windowState() & ~Qt.WindowState.WindowMinimized)
+    screen = active_screen()
+    here = window.screen()
+    if screen is not None and (here is None or here.name() != screen.name()):
+        area = screen.availableGeometry()
+        frame = window.frameGeometry()
+        frame.moveCenter(area.center())
+        # Kept inside the screen, so a window taller than the room left
+        # still has its titlebar where it can be grabbed.
+        window.move(max(frame.left(), area.left()), max(frame.top(), area.top()))
+    window.show()
+    window.raise_()
+    window.activateWindow()
+
+
 def main():
     argv = sys.argv[1:]
+    # The login entries pass --autostart and nothing else. It is the one start
+    # that may stay in the tray, which is why it is told apart from a click
+    # on the menu entry, and it never goes through the command line's verbs.
+    if "--autostart" in argv:
+        return run_app(["autostart"])
     # Anything typed at a terminal is the command line's business, including
     # --help and the verbs that only need a message sent. It comes back here
     # with --gui when it turns out there is no instance to send one to.
@@ -1640,10 +1671,15 @@ def run_app(args):
     # second tray icon. The lock lives in this frame, which app.exec() below
     # keeps alive for exactly the process's lifetime.
     lock = ipc.instance_lock()
+    # A login start finding Dikte already up has nothing to ask of it: the
+    # tray is there, and a window it did not ask for is the thing to avoid.
     if lock is not None and not lock.tryLock(0):
-        _hand_over(command)
+        if command != "autostart":
+            _hand_over(command)
         return 0
     if ipc.already_serving():
+        if command == "autostart":
+            return 0
         print("dikte: already running; handing it the attention")
         if command:
             ipc.send(command)
@@ -1723,11 +1759,13 @@ def run_app(args):
     server.newConnection.connect(on_connection)
     app.aboutToQuit.connect(dikte.shutdown)
 
-    # Explicit home requests and first setup open the daily workspace.
-    # A configured --gui background start stays quiet for login and restart.
+    # Explicit home requests and first setup open the daily workspace. A
+    # configured --gui background start stays quiet for restart, and a login
+    # start stays quiet unless the settings ask for the window.
     if command == "settings":
         dikte.open_settings()
-    elif command == "home" or not dikte.conf.transcribe_ready():
+    elif (command == "home" or not dikte.conf.transcribe_ready()
+          or command == "autostart" and not dikte.conf["start_in_tray"]):
         dikte.open_home()
     elif command == "toggle":
         QTimer.singleShot(0, dikte.toggle)

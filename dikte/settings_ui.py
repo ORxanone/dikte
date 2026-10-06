@@ -2,6 +2,7 @@
 
 import functools
 import os
+import pathlib
 import shutil
 import sys
 import threading
@@ -12,7 +13,8 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QAbstractSpinBox, QCheckBox, QComboBox, QDialog,
     QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit,
-    QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTabWidget, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 from . import __version__
@@ -23,6 +25,7 @@ from . import cleanup
 from . import config as cfg
 from . import filetranscribe
 from . import ggml
+from . import hardware
 from . import hotkey
 from . import hub
 from . import i18n
@@ -41,6 +44,16 @@ LANGUAGES = [
     ("Arabic", "ar"),
 ]
 CORNERS = ["bottom-left", "bottom-right", "top-left", "top-right"]
+
+
+def _graphics_device_label(device):
+    if not device.memory or device.shared is None:
+        return device.name
+    kind = t("shared") if device.shared else t("dedicated")
+    return t("{name} ({size} {kind})",
+             name=device.name, size=ggml.human_size(device.memory), kind=kind)
+
+
 # The provider box offers what config knows how to reach, this machine first.
 TRANSCRIBE_PROVIDERS = ([("This machine (whisper.cpp)", "local")]
                         + [(who.service, name)
@@ -56,6 +69,10 @@ TRANSCRIBE_MODELS = {
         "openai/whisper-large-v3-turbo", "mistralai/voxtral-mini-transcribe",
         "deepgram/nova-3", "google/chirp-3",
     ],
+    "requesty": [
+        "openai/gpt-4o-transcribe", "openai/gpt-4o-mini-transcribe",
+        "openai/whisper-1",
+    ],
 }
 CLEANUP_MODELS = [
     "google/gemini-3.5-flash-lite", "google/gemini-3.1-flash-lite",
@@ -66,6 +83,7 @@ GEMINI_MODELS = [
     "gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
     "gemini-2.5-flash-lite", "gemini-3.5-flash", "gemini-2.5-flash",
 ]
+DEEPSEEK_MODELS = ["deepseek-flash", "deepseek-v4-pro"]
 # agy's model ids carry the reasoning effort in their suffix, which is why one
 # model appears here at more than one level. The same list seeds two boxes:
 # cleanup, which wants the bottom rung, and the agent, which sometimes does not.
@@ -78,8 +96,9 @@ AGY_MODELS = [
 # agent can run on open a whole session to do the smaller job.
 CLEANUP_PROVIDERS = [
     ("OpenRouter", "openrouter"), ("Google AI Studio", "gemini"),
-    ("OpenCode Go", "opencode"), ("This machine (llama.cpp)", "local"),
-    ("Claude Code", "claude"), ("Codex", "codex"), ("Antigravity", "agy"),
+    ("DeepSeek", "deepseek"), ("OpenCode Go", "opencode"), ("Requesty", "requesty"),
+    ("This machine (llama.cpp)", "local"), ("Claude Code", "claude"),
+    ("Codex", "codex"), ("Antigravity", "agy"),
 ]
 # Cleaning up a sentence is the lightest thing either of them will ever be
 # asked, so the small model comes first.
@@ -93,6 +112,7 @@ MEETING_MODELS = [
 ASSISTANT_PROVIDERS = [
     ("Claude Code", "claude"), ("Codex", "codex"), ("Antigravity", "agy"),
     ("OpenRouter", "openrouter"), ("OpenCode Go", "opencode"),
+    ("Requesty", "requesty"),
 ]
 # Aliases resolve to the newest model of that name, so they age better than an
 # id does; a full id can be typed in when a particular one is wanted.
@@ -113,6 +133,12 @@ OPENCODE_MODELS = [
     "deepseek-v4-flash", "deepseek-v4-pro", "glm-5.3", "glm-5.2", "glm-5.1",
     "kimi-k3", "kimi-k2.7-code", "kimi-k2.6", "longcat-2.0",
     "mimo-v2.5", "mimo-v2.5-pro", "hy3",
+]
+# The same idea for Requesty, whose Fetch button puts its managed models (the
+# short names) ahead of the full vendor/model catalog.
+REQUESTY_MODELS = [
+    "google/gemini-3.5-flash-lite", "google/gemini-3.5-flash",
+    "openai/gpt-4o-mini", "gpt-5.4-mini", "deepseek-v4-flash",
 ]
 # What Claude Code may do without being able to ask. It cannot ask: there is no
 # window to answer in, so a mode that would have prompted denies instead.
@@ -256,12 +282,12 @@ class LocalModelBox(QGroupBox):
     _installed = pyqtSignal(str, str)
 
     changed = pyqtSignal()
+    program_changed = pyqtSignal()
 
-    def __init__(self, program, title, models, model_path, binary=None,
-                 repos=None, parent=None):
+    def __init__(self, program, title, models, model_path, repos=None, parent=None):
         super().__init__(title, parent)
         self.program = program
-        self._binary = binary          # () -> a path set by hand, or ""
+        self.custom_binary = ""  # UI draft; only Save writes the configuration.
         self._models = models          # () -> [hub.Item], or (repo) -> [hub.Item]
         self._model_path = model_path  # (name) -> Path
         self._repos = repos            # None, or () -> [repo id]
@@ -293,6 +319,10 @@ class LocalModelBox(QGroupBox):
         self.install_button.clicked.connect(self._install_program)
         form.addRow(t("Program"), self._side_by_side(self.program_label,
                                                      self.install_button))
+
+        self.automatic_button = QPushButton(t("Use automatic selection"))
+        self.automatic_button.clicked.connect(self._use_automatic_program)
+        form.addRow("", self.automatic_button)
 
         # What the model rows are judged against, said out loud. Without it,
         # "too big for this machine" and the recommendation above the list are
@@ -434,57 +464,91 @@ class LocalModelBox(QGroupBox):
                 self._fill_repos(self.repository())
             self._fetch_models(self.repository())
 
+    def _use_automatic_program(self):
+        self.custom_binary = ""
+        self._show_program()
+        self._refresh_buttons()
+        self.changed.emit()
+        self.program_changed.emit()
+
     def _program_path(self):
-        return ggml.program_path(self.program,
-                                 self._binary() if self._binary else "")
+        return ggml.program_path(self.program, self.custom_binary)
 
     def _show_program(self):
+        self.automatic_button.setVisible(bool(self.custom_binary))
         path = self._program_path()
+        installed = ggml.installed_program(self.program)
+        # Installed and selected are independent: a download never changes an
+        # explicit override, and automatic resolution still prefers PATH.
+        self.install_button.setText(t("Download again") if installed else t("Download"))
+        self.install_button.setVisible(bool(self.custom_binary)
+                                       or not ggml.system_program(self.program))
         if not path:
-            self.program_label.setText(t("Not installed."))
-            self.install_button.setText(t("Download"))
+            self.program_label.setText(
+                t("Custom program unavailable: {path}", path=self.custom_binary)
+                if self.custom_binary else t("Not installed."))
             self.install_button.setVisible(True)
             return
-        if self._binary and self._binary():
-            # Neither a system copy nor one Dikte fetched, and "Downloaded"
-            # over a build someone made themselves is not true.
-            self.program_label.setText(t("Using custom build: {path}", path=path))
-            self.install_button.setVisible(False)
-            return
-        # A copy that is here is not a copy that is right. whisper.cpp releases
-        # every few weeks, and a graphics card installed after Dikte was
-        # changes which build this machine should be running; the button was
-        # hidden the moment anything landed, and nothing else on this window
-        # asks for the download again.
-        self.install_button.setText(t("Download again")
-                                    if ggml.installed_program(self.program)
-                                    else t("Download"))
-        self.install_button.setVisible(not ggml.system_program(self.program))
-        if ggml.system_program(self.program):
-            # Worth saying which one is running: a distribution package is built
-            # for this machine and may reach the graphics card, while the
-            # released binaries carry processor backends only.
-            self.program_label.setText(t("Installed on the system: {path}", path=path))
+        managed = bool(installed and pathlib.Path(path).resolve()
+                       == pathlib.Path(installed).resolve())
+        if not managed:
+            self.program_label.setText(
+                t("Using custom build: {path}", path=path) if self.custom_binary else
+                t("Installed on the system: {path}", path=path))
         elif ggml.vulkan_missing(self.program):
             # The download landed the processor build where the graphics card
             # one belongs, and nothing else on this window would say so.
             self.program_label.setText(
-                t("Downloaded, version {version}. There was no Vulkan build, "
+                t("Downloaded: {name}, version {version}. There was no Vulkan build, "
                   "so this one runs on the processor.",
+                  name=self.program.repo.rsplit("/", 1)[-1],
                   version=ggml.installed_version(self.program) or "?"))
         else:
             self.program_label.setText(
-                t("Downloaded, version {version}.",
+                t("Downloaded: {name}, version {version}.",
+                  name=self.program.repo.rsplit("/", 1)[-1],
                   version=ggml.installed_version(self.program) or "?"))
 
-    def _show_machine(self):
+    def _show_machine(self, selection=None, devices=(), selectable=None):
         where = ggml.accelerator()
         memory = ggml.total_memory()
-        parts = [t("Graphics: {name}.", name=where) if where else
-                 t("No graphics interface found, so this runs on the processor.")]
+        parts = []
+        memory_parts = []
+        selectable = devices if selectable is None else selectable
+        chosen = next(
+            (device for device in selectable
+             if device.identifier and device.identifier == selection),
+            None,
+        )
+        if selection == "cpu":
+            parts.append(t("Selected: Processor (CPU)."))
+        elif selection == "auto":
+            parts.append(t("Selected: Automatic."))
+        elif selection:
+            if chosen is None:
+                parts.append(t("Selected: Graphics card unavailable."))
+            else:
+                parts.append(t("Selected: {name}.", name=chosen.name))
+                if chosen.memory and chosen.shared is not None:
+                    kind = t("shared") if chosen.shared else t("dedicated")
+                    memory_parts.append(t("{size} {kind} graphics",
+                                          size=ggml.human_size(chosen.memory),
+                                          kind=kind))
+        if selection in ("cpu", "auto"):
+            if devices:
+                parts.append(t("Graphics: {devices}.", devices="; ".join(
+                    _graphics_device_label(device) for device in devices
+                )))
+            elif where:
+                parts.append(t("Graphics: {name}.", name=where))
+        elif selection is None:
+            parts.append(t("Graphics: {name}.", name=where) if where
+                         else t("Graphics: Processor only."))
         if memory:
-            parts.append(t("Memory: {size}.", size=ggml.human_size(memory)))
-        self.machine_label.setText(" ".join(parts))
+            memory_parts.append(t("{size} system", size=ggml.human_size(memory)))
+        if memory_parts:
+            parts.append(t("Memory: {memory}.", memory="; ".join(memory_parts)))
+        self.machine_label.setText("\n".join(parts))
 
     # ---- the lists -------------------------------------------------------
 
@@ -732,11 +796,14 @@ class LocalModelBox(QGroupBox):
         self.install_button.setEnabled(True)
         self._show_program()
         if error:
-            self.program_label.setText(error)
+            self.program_label.setText(
+                self.program_label.text() + "\n" +
+                t("Download failed: {error}", error=error))
         # The model line says whether the program is here, so installing one
         # changes what it should read.
         self._refresh_buttons()
         self.changed.emit()
+        self.program_changed.emit()
 
     def _current_item(self):
         return self.model.currentData(Qt.ItemDataRole.UserRole + 1)
@@ -901,7 +968,9 @@ class SettingsWindow(QDialog):
 
     _models_loaded = pyqtSignal(list, str)
     _gemini_models_loaded = pyqtSignal(list, str)
+    _deepseek_models_loaded = pyqtSignal(list, str)
     _opencode_models_loaded = pyqtSignal(list, str)
+    _requesty_models_loaded = pyqtSignal(list, str)
     _transcribe_models_loaded = pyqtSignal(list, str)
     _codex_models_loaded = pyqtSignal(list)
     _agy_models_loaded = pyqtSignal(list)
@@ -911,11 +980,23 @@ class SettingsWindow(QDialog):
     _test_done = pyqtSignal(str, bool, str)
     # The release that was found, or None, and what went wrong instead.
     _update_checked = pyqtSignal(object, str)
+    _processing_devices_loaded = pyqtSignal(object, object, int)
 
     def __init__(self, conf, meetings=None, parent=None):
         super().__init__(parent)
+        if parent is None and sys.platform not in ("darwin", "win32"):
+            # Under X11 a dialog without a parent is marked transient for the
+            # whole application, and KWin keeps such a window on the virtual
+            # desktop of the home window. Opening Settings from another
+            # desktop then switched the user back there. A plain top-level
+            # window is placed on its own, like the home window.
+            self.setWindowFlags(
+                (self.windowFlags() & ~Qt.WindowType.WindowType_Mask)
+                | Qt.WindowType.Window)
         self.conf = conf
         self.meetings = meetings
+        self._processing_devices_request = 0
+        self._processing_devices_loaded.connect(self._set_processing_devices)
         # Filled in by _shortcut_row as the tabs are built: which combination
         # box, status label and "nothing installed" line belong to each of the
         # global shortcuts. One dictionary is what lets install, remove and the
@@ -996,9 +1077,11 @@ class SettingsWindow(QDialog):
 
         self._models_loaded.connect(self._on_models_loaded)
         self._gemini_models_loaded.connect(self._on_gemini_models_loaded)
+        self._deepseek_models_loaded.connect(self._on_deepseek_models_loaded)
         self._transcribe_models_loaded.connect(self._on_transcribe_models_loaded)
         self._codex_models_loaded.connect(self._on_codex_models_loaded)
         self._opencode_models_loaded.connect(self._on_opencode_models_loaded)
+        self._requesty_models_loaded.connect(self._on_requesty_models_loaded)
         self._agy_models_loaded.connect(self._on_agy_models_loaded)
         self._hosted_models_loaded.connect(self._on_hosted_models_loaded)
         self._test_done.connect(self._on_test_done)
@@ -1031,6 +1114,11 @@ class SettingsWindow(QDialog):
                 box.toggled.connect(self._show_dirty)
             else:
                 box.valueChanged.connect(self._show_dirty)
+        self.local_threads.valueChanged.connect(self._local_threads_was_changed)
+        self.local_whisper.program_changed.connect(self._refresh_processing_devices)
+        self.local_whisper.program_changed.connect(self._show_dirty)
+        self.local_llm.program_changed.connect(self._show_dirty)
+        self._refresh_processing_devices()
         self._load_codex_models()
         self._load_agy_models()
         self._load_hosted_models()
@@ -1071,6 +1159,10 @@ class SettingsWindow(QDialog):
         if provider in models:
             models[provider] = self.transcribe_model.currentText().strip()
         values.append(models)
+        values.extend((
+            self.local_whisper.custom_binary,
+            self.local_llm.custom_binary,
+        ))
         return values
 
     def refresh_configuration(self):
@@ -1263,6 +1355,14 @@ class SettingsWindow(QDialog):
         )
         form.addRow("", self.keep_audio)
 
+        self.start_in_tray = QCheckBox(t("Start in the tray when I log in"))
+        self.start_in_tray.setToolTip(
+            t("Only the start at login. Opening Dikte from the menu always "
+              "shows the window, and so does a first start that still needs "
+              "setting up.")
+        )
+        form.addRow("", self.start_in_tray)
+
         self.update_check = QCheckBox(t("Look for a newer version once a day"))
         self.update_check.setToolTip(
             t("Dikte only looks. What it finds opens the release page in your "
@@ -1351,9 +1451,15 @@ class SettingsWindow(QDialog):
         self.gemini_key = self._key_row(
             keys_form, "gemini", t("(falls back to GEMINI_API_KEY)"),
             self._test_gemini, service="Google AI Studio")
+        self.deepseek_key = self._key_row(
+            keys_form, "deepseek", t("(falls back to DEEPSEEK_API_KEY)"),
+            self._test_deepseek, service="DeepSeek")
         self.opencode_key = self._key_row(
             keys_form, "opencode", t("(falls back to OPENCODE_API_KEY)"),
             self._test_opencode, service="OpenCode Go")
+        self.requesty_key = self._key_row(
+            keys_form, "requesty", t("(falls back to REQUESTY_API_KEY)"),
+            self._test_requesty)
         outer.addWidget(keys)
 
         stt = QGroupBox(t("Speech to text"))
@@ -1393,37 +1499,62 @@ class SettingsWindow(QDialog):
 
         self.local_whisper = LocalModelBox(
             ggml.WHISPER, t("On this machine"),
-            ggml.whisper_models, ggml.whisper_model_path,
-            binary=lambda: self.conf["local_binary"])
+            ggml.whisper_models, ggml.whisper_model_path)
         stt_form.addRow(self.local_whisper)
 
-        self.local_gpu = QCheckBox(t("Use the graphics card"))
-        self.local_gpu.setToolTip(
-            t("whisper.cpp reaches the card through CUDA, ROCm or Vulkan when the "
-              "build it is running was made with one. A build without any of them "
-              "runs on the processor whatever this says."))
+        self.local_device = QComboBox()
+        self.local_device.addItem(t("Automatic (whisper.cpp default)"), "auto")
+        self.local_device.addItem(t("Processor (CPU)"), "cpu")
+        self._graphics_devices = ()
+        self._selectable_graphics_devices = ()
+        LocalModelBox._fit_popup(self.local_device)
+        self.local_device.setToolTip(t(
+            "Automatic lets whisper.cpp choose a graphics card when its build "
+            "supports one. Processor keeps all speech recognition on the CPU."
+        ))
+        self.local_device.currentIndexChanged.connect(
+            self._processing_device_changed
+        )
         self.local_preload = QCheckBox(t("Load the model when Dikte starts"))
         self.local_preload.setToolTip(
             t("A large model takes a second or two to load. Loading it up front "
               "spends that once instead of on the first dictation, at the cost of "
               "the memory it sits in."))
         self.local_threads = QSpinBox()
-        max_threads = max(1, os.cpu_count() or 1)
-        self.local_threads.setRange(0, max_threads)
+        self._local_threads_changed = False
+        self.local_threads.setRange(0, hardware.cpu_threads())
         self.local_threads.setSpecialValueText(t("Automatic"))
-        # A spin box asks for room for its numbers, and the word standing in for
-        # zero is what actually has to fit, and on macOS, where the stepper sits
-        # inside the frame, it does not. Widened to the word rather than to a
-        # number picked by eye, so that it still fits once the word is "Otomatik".
+        self.local_threads.setToolTip(t(
+            "CPU-thread limit available to this process: {count}. "
+            "Automatic lets whisper.cpp choose. More threads are not always faster.",
+            count=self.local_threads.maximum(),
+        ))
+        # A spin box asks for room for its numbers:
+        # the word standing in for zero is what actually has to fit, and on
+        # macOS, where the stepper sits inside the frame, it does not. Widened
+        # to the word rather than to a number picked by eye, so that it still
+        # fits once the word is "Otomatik".
         self.local_threads.setMinimumWidth(
             self.local_threads.fontMetrics()
             .horizontalAdvance(t("Automatic")) + 56)
         self.local_options = QWidget()
-        options_form = QFormLayout(self.local_options)
+        options_form = self.local_options_form = QFormLayout(self.local_options)
         options_form.setContentsMargins(0, 0, 0, 0)
-        options_form.addRow("", self.local_gpu)
+        options_form.addRow(t("Processing device"), self.local_device)
         options_form.addRow("", self.local_preload)
-        options_form.addRow(t("Threads"), self.local_threads)
+        self.local_advanced_toggle = QToolButton()
+        self.local_advanced_toggle.setObjectName("disclosure")
+        self.local_advanced_toggle.setText(t("Advanced"))
+        self.local_advanced_toggle.setCheckable(True)
+        self.local_advanced_toggle.setAutoRaise(True)
+        self.local_advanced_toggle.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.local_advanced_toggle.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        options_form.addRow(self.local_advanced_toggle)
+        options_form.addRow(t("CPU threads"), self.local_threads)
+        self.local_advanced_toggle.toggled.connect(self._toggle_local_advanced)
+        self._toggle_local_advanced(False)
         stt_form.addRow(self.local_options)
         # What the model is actually doing, as against what the boxes above
         # ask for. The checkbox can only ask: whether a card was found is
@@ -1464,6 +1595,14 @@ class SettingsWindow(QDialog):
         self.cleanup_gemini_model_row = self._row(
             self.cleanup_gemini_model, self.refresh_gemini_models)
         orr_form.addRow(t("Model"), self.cleanup_gemini_model_row)
+        self.cleanup_deepseek_model = QComboBox()
+        self.cleanup_deepseek_model.setEditable(True)
+        self.cleanup_deepseek_model.addItems(DEEPSEEK_MODELS)
+        self.refresh_deepseek_models = QPushButton(t("Fetch model list"))
+        self.refresh_deepseek_models.clicked.connect(self._load_deepseek_models)
+        self.cleanup_deepseek_model_row = self._row(
+            self.cleanup_deepseek_model, self.refresh_deepseek_models)
+        orr_form.addRow(t("Model"), self.cleanup_deepseek_model_row)
 
         # One row per provider rather than one box that means a different thing
         # in each: an OpenRouter id and a Claude alias do not belong in the same
@@ -1490,6 +1629,16 @@ class SettingsWindow(QDialog):
                                                     self.refresh_opencode_models)
         orr_form.addRow(t("Model"), self.cleanup_opencode_model_row)
 
+        self.cleanup_requesty_model = QComboBox()
+        self.cleanup_requesty_model.setEditable(True)
+        self.cleanup_requesty_model.addItems(REQUESTY_MODELS)
+        self.cleanup_requesty_model.setToolTip(_typed_model_note("Requesty"))
+        self.refresh_requesty_models = QPushButton(t("Fetch model list"))
+        self.refresh_requesty_models.clicked.connect(self._load_requesty_models)
+        self.cleanup_requesty_model_row = self._row(self.cleanup_requesty_model,
+                                                    self.refresh_requesty_models)
+        orr_form.addRow(t("Model"), self.cleanup_requesty_model_row)
+
         self.cleanup_agy_model = QComboBox()
         self.cleanup_agy_model.setEditable(True)
         self.cleanup_agy_model.addItems([t("Antigravity's own default")] + AGY_MODELS)
@@ -1512,7 +1661,6 @@ class SettingsWindow(QDialog):
         self.local_llm = LocalModelBox(
             ggml.LLAMA, t("On this machine"),
             ggml.llm_quants, ggml.llm_model_path,
-            binary=lambda: self.conf["local_llm_binary"],
             repos=ggml.llm_repos)
         orr_form.addRow(self.local_llm)
 
@@ -1768,6 +1916,25 @@ class SettingsWindow(QDialog):
         og_note.setWordWrap(True)
         og_form.addRow(og_note)
         layout.addWidget(self.opencode_box)
+
+        self.requesty_box = QGroupBox("Requesty")
+        rq_form = QFormLayout(self.requesty_box)
+        rq_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self.assistant_requesty_model = QComboBox()
+        self.assistant_requesty_model.setEditable(True)
+        self.assistant_requesty_model.addItems(REQUESTY_MODELS)
+        rq_form.addRow(t("Model"), self.assistant_requesty_model)
+        rq_note = QLabel(t(
+            "A plain question and a plain answer, over the Requesty key you "
+            "already have. It runs no commands, opens no files and reaches none "
+            "of your services, so it can tell you what the capital of Peru is "
+            "but not what is in your calendar. Working directory and permissions "
+            "above mean nothing here."
+        ))
+        rq_note.setWordWrap(True)
+        rq_form.addRow(rq_note)
+        layout.addWidget(self.requesty_box)
 
         thread = QGroupBox(t("The conversation"))
         thread_form = QFormLayout(thread)
@@ -2351,26 +2518,50 @@ class SettingsWindow(QDialog):
         self.filter_hallucinations.setChecked(conf["filter_hallucinations"])
         self.keep_audio.setChecked(conf["keep_audio"])
         self.update_check.setChecked(conf["update_check"])
+        self.start_in_tray.setChecked(conf["start_in_tray"])
         self._show_update(update.pending())
 
         for name, who in cfg.TRANSCRIBERS.items():
             self._key_fields[name].setText(conf[who.key])
             self._models[name] = conf[who.model]
         self.gemini_key.setText(conf["gemini_api_key"])
+        self.deepseek_key.setText(conf["deepseek_api_key"])
         self.opencode_key.setText(conf["opencode_api_key"])
         self._shown_provider = ""
         self._select_data(self.transcribe_provider, conf["transcribe_provider"])
         self._provider_changed()  # selecting index 0 fires no signal
         self.file_model.setCurrentText(conf["openrouter_file_model"])
-        self.local_gpu.setChecked(conf["local_gpu"])
+        binary_changed = self.local_whisper.custom_binary != conf["local_binary"]
+        self.local_whisper.custom_binary = conf["local_binary"]
+        processing_device = conf["local_device"]
+        if processing_device not in ("auto", "cpu") \
+                and self.local_device.findData(processing_device) < 0:
+            self.local_device.addItem(
+                t("Previously selected graphics card (unavailable)"),
+                processing_device,
+            )
+        self._select_data(self.local_device, processing_device)
+        self._processing_device_changed()
         self.local_preload.setChecked(conf["local_preload"])
-        self.local_threads.setValue(int(conf["local_threads"]))
+        saved_threads = cfg._local_thread_count(conf["local_threads"])
+        self.local_threads.setValue(min(saved_threads, self.local_threads.maximum()))
+        self._local_threads_changed = False
+        # A deliberate manual override must not disappear behind a disclosure.
+        self.local_advanced_toggle.setChecked(self.local_threads.value() != 0)
         self.local_whisper.load(conf["local_model"])
+        # Initial construction probes after signals are connected. Every later
+        # reload must invalidate the old draft's probe as soon as it restores a
+        # different executable.
+        if binary_changed and hasattr(self, "_saved_form"):
+            self._refresh_processing_devices()
 
         self.cleanup_enabled.setChecked(conf["cleanup_enabled"])
         self.cleanup_model.setCurrentText(conf["cleanup_model"])
         self.cleanup_gemini_model.setCurrentText(
             conf["cleanup_gemini_model"] or cfg.DEFAULTS["cleanup_gemini_model"]
+        )
+        self.cleanup_deepseek_model.setCurrentText(
+            conf["cleanup_deepseek_model"] or cfg.DEFAULTS["cleanup_deepseek_model"]
         )
         self.cleanup_claude_model.setCurrentText(conf["cleanup_claude_model"])
         self.cleanup_codex_model.setCurrentText(
@@ -2380,12 +2571,14 @@ class SettingsWindow(QDialog):
             conf["cleanup_agy_model"] or t("Antigravity's own default")
         )
         self.cleanup_opencode_model.setCurrentText(conf["cleanup_opencode_model"])
+        self.cleanup_requesty_model.setCurrentText(conf["cleanup_requesty_model"])
         self._select_data(self.cleanup_provider, conf["cleanup_provider"])
         self._cleanup_provider_changed()  # selecting index 0 fires no signal
         self._select_data(self.cleanup_reasoning, conf["cleanup_reasoning"])
         self.local_llm_gpu.setChecked(conf["local_llm_gpu"])
         self.local_llm_preload.setChecked(conf["local_llm_preload"])
         self._select_data(self.local_llm_reasoning, conf["local_llm_reasoning"])
+        self.local_llm.custom_binary = conf["local_llm_binary"]
         self.local_llm.load(conf["local_llm_model"], conf["local_llm_repo"])
         self.local_idle_unload.setChecked(conf["local_idle_unload"])
         self.local_idle_minutes.setValue(int(conf["local_idle_minutes"]))
@@ -2405,6 +2598,7 @@ class SettingsWindow(QDialog):
         self.assistant_openrouter_model.setCurrentText(conf["assistant_openrouter_model"])
         self.assistant_agy_model.setCurrentText(conf["assistant_agy_model"])
         self.assistant_opencode_model.setCurrentText(conf["assistant_opencode_model"])
+        self.assistant_requesty_model.setCurrentText(conf["assistant_requesty_model"])
         self._assistant_provider_changed()  # selecting index 0 fires no signal
         self._select_data(self.assistant_reasoning, conf["assistant_reasoning"])
         self.assistant_dir.setText(conf["assistant_dir"])
@@ -2472,6 +2666,7 @@ class SettingsWindow(QDialog):
         conf["filter_hallucinations"] = self.filter_hallucinations.isChecked()
         conf["keep_audio"] = self.keep_audio.isChecked()
         conf["update_check"] = self.update_check.isChecked()
+        conf["start_in_tray"] = self.start_in_tray.isChecked()
 
         provider = self.transcribe_provider.currentData() or "local"
         if provider in self._models:
@@ -2482,11 +2677,16 @@ class SettingsWindow(QDialog):
             conf[who.model] = self._models[name].strip() or cfg.DEFAULTS[who.model]
         conf["openrouter_file_model"] = self.file_model.currentText().strip()
         conf["gemini_api_key"] = self.gemini_key.text().strip()
+        conf["deepseek_api_key"] = self.deepseek_key.text().strip()
         conf["opencode_api_key"] = self.opencode_key.text().strip()
+        conf["local_binary"] = self.local_whisper.custom_binary
+        conf["local_llm_binary"] = self.local_llm.custom_binary
         conf["local_model"] = self.local_whisper.selected()
-        conf["local_gpu"] = self.local_gpu.isChecked()
+        conf["local_device"] = self.local_device.currentData() or "auto"
+        conf["local_gpu"] = conf["local_device"] != "cpu"
         conf["local_preload"] = self.local_preload.isChecked()
-        conf["local_threads"] = self.local_threads.value()
+        if self._local_threads_changed:
+            conf["local_threads"] = self.local_threads.value()
 
         conf["cleanup_enabled"] = self.cleanup_enabled.isChecked()
         conf["cleanup_provider"] = self.cleanup_provider.currentData() or "openrouter"
@@ -2494,6 +2694,10 @@ class SettingsWindow(QDialog):
         conf["cleanup_gemini_model"] = (
             self.cleanup_gemini_model.currentText().strip()
             or cfg.DEFAULTS["cleanup_gemini_model"]
+        )
+        conf["cleanup_deepseek_model"] = (
+            self.cleanup_deepseek_model.currentText().strip()
+            or cfg.DEFAULTS["cleanup_deepseek_model"]
         )
         conf["cleanup_claude_model"] = (self.cleanup_claude_model.currentText().strip()
                                         or cfg.DEFAULTS["cleanup_claude_model"])
@@ -2509,6 +2713,10 @@ class SettingsWindow(QDialog):
         conf["cleanup_opencode_model"] = (
             self.cleanup_opencode_model.currentText().strip()
             or cfg.DEFAULTS["cleanup_opencode_model"]
+        )
+        conf["cleanup_requesty_model"] = (
+            self.cleanup_requesty_model.currentText().strip()
+            or cfg.DEFAULTS["cleanup_requesty_model"]
         )
         conf["cleanup_reasoning"] = self.cleanup_reasoning.currentData() or ""
         conf["local_llm_model"] = self.local_llm.selected()
@@ -2554,6 +2762,10 @@ class SettingsWindow(QDialog):
             self.assistant_opencode_model.currentText().strip()
             or cfg.DEFAULTS["assistant_opencode_model"]
         )
+        conf["assistant_requesty_model"] = (
+            self.assistant_requesty_model.currentText().strip()
+            or cfg.DEFAULTS["assistant_requesty_model"]
+        )
         conf["assistant_reasoning"] = self.assistant_reasoning.currentData() or ""
         conf["assistant_dir"] = self.assistant_dir.text().strip()
         conf["assistant_timeout"] = self.assistant_timeout.value()
@@ -2598,7 +2810,12 @@ class SettingsWindow(QDialog):
         conf["history_limit"] = self.history_limit.value()
         # A retained form may predate a CLI reload. Only its edits take priority;
         # unchanged fields keep the current runtime value.
+        device_edited = (
+            conf["local_device"] != self._loaded_config.get("local_device")
+        )
         for key, value in before.items():
+            if device_edited and key in ("local_device", "local_gpu"):
+                continue
             if conf.data.get(key) == self._loaded_config.get(key):
                 conf.data[key] = value
         try:
@@ -2656,6 +2873,82 @@ class SettingsWindow(QDialog):
 
     # ---- api helpers -----------------------------------------------------
 
+    def _toggle_local_advanced(self, expanded):
+        self.local_options_form.setRowVisible(self.local_threads, expanded)
+        self.local_advanced_toggle.setArrowType(
+            Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+
+    def _local_threads_was_changed(self):
+        self._local_threads_changed = True
+
+    def _refresh_processing_devices(self):
+        custom = self.local_whisper.custom_binary
+        self._processing_devices_request += 1
+        request = self._processing_devices_request
+        # A previous binary's verified mapping is not evidence for the new
+        # draft (or replacement download). Keep its UUID, not its verification.
+        self._set_processing_devices(self._graphics_devices, ())
+
+        def work():
+            devices = hardware.graphics_devices()
+            binary = ggml.program_path(ggml.WHISPER, custom)
+            managed = ggml.managed_vulkan_devices(binary, devices)
+            self._processing_devices_loaded.emit(devices, managed, request)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _set_processing_devices(self, devices, managed, request=None):
+        if request is not None and request != self._processing_devices_request:
+            return
+        current = self.local_device.currentData() or "auto"
+        self._graphics_devices = tuple(devices)
+        self._selectable_graphics_devices = tuple(managed)
+        self.local_device.blockSignals(True)
+        self.local_device.clear()
+        self.local_device.addItem(t("Automatic (whisper.cpp default)"), "auto")
+        self.local_device.addItem(t("Processor (CPU)"), "cpu")
+        for device in managed:
+            if device.identifier:
+                self.local_device.addItem(
+                    device.name, device.identifier
+                )
+        if current not in ("auto", "cpu") \
+                and self.local_device.findData(current) < 0:
+            self.local_device.addItem(
+                t("Previously selected graphics card (unavailable)"), current
+            )
+        self._select_data(self.local_device, current)
+        self.local_device.blockSignals(False)
+        LocalModelBox._fit_popup(self.local_device)
+        self._processing_device_changed()
+
+    def _processing_device_changed(self):
+        self.local_whisper._show_machine(
+            self.local_device.currentData() or "auto",
+            self._graphics_devices,
+            self._selectable_graphics_devices,
+        )
+        selectable = {device.identifier for device in self._selectable_graphics_devices
+                      if device.identifier}
+        if self._graphics_devices and any(
+                not device.identifier or device.identifier not in selectable
+                for device in self._graphics_devices):
+            binary = ggml.program_path(ggml.WHISPER, self.local_whisper.custom_binary)
+            if "GGML_VK_VISIBLE_DEVICES" in os.environ:
+                reason = t("GGML_VK_VISIBLE_DEVICES overrides graphics visibility.")
+            elif not ggml.managed_vulkan_in_use(binary):
+                reason = t("The selected custom or unmanaged program does not provide "
+                           "verified explicit graphics selection.")
+            else:
+                reason = t("The program's graphics device mapping could not be verified.")
+            hint = t("Detected graphics: {devices}. {reason} Automatic may still use "
+                     "a graphics card if the program supports it.",
+                     devices="; ".join(_graphics_device_label(device)
+                                       for device in self._graphics_devices),
+                     reason=reason)
+            label = self.local_whisper.machine_label
+            label.setText(label.text() + "\n" + hint)
+
     def _provider_changed(self):
         """Swap the model box over to the newly chosen provider's own model."""
         if self._shown_provider in TRANSCRIBE_MODELS:
@@ -2665,6 +2958,9 @@ class SettingsWindow(QDialog):
         local = provider == "local"
         self.stt_form.setRowVisible(self.transcribe_model_row, not local)
         self.stt_form.setRowVisible(self.file_model_row, provider == "openrouter")
+        # Requesty transcribes with models it does not list, so there is
+        # nothing for the button to fetch.
+        self.refresh_transcribe_models.setVisible(provider != "requesty")
         self.stt_form.setRowVisible(self.transcribe_status, not local)
         self.stt_form.setRowVisible(self.local_whisper, local)
         self.stt_form.setRowVisible(self.local_options, local)
@@ -2766,6 +3062,31 @@ class SettingsWindow(QDialog):
         self.cleanup_gemini_model.setCurrentText(current)
         self.models_label.setText(t("{count} models loaded.", count=len(models)))
 
+    def _load_deepseek_models(self):
+        self.refresh_deepseek_models.setEnabled(False)
+        self.models_label.setText(t("Fetching model list…"))
+        key, base = self._typed_key("deepseek")
+
+        def work():
+            try:
+                self._deepseek_models_loaded.emit(
+                    api.openai_models(key, base, "DeepSeek"), "")
+            except api.ApiError as exc:
+                self._deepseek_models_loaded.emit([], str(exc))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_deepseek_models_loaded(self, models, error):
+        self.refresh_deepseek_models.setEnabled(True)
+        if error:
+            self.models_label.setText(t("Could not fetch the list: {error}", error=error))
+            return
+        current = self.cleanup_deepseek_model.currentText()
+        self.cleanup_deepseek_model.clear()
+        self.cleanup_deepseek_model.addItems(models)
+        self.cleanup_deepseek_model.setCurrentText(current)
+        self.models_label.setText(t("{count} models loaded.", count=len(models)))
+
     def _load_codex_models(self):
         """Ask Codex which models it offers, off the interface thread.
 
@@ -2824,6 +3145,35 @@ class SettingsWindow(QDialog):
             combo.addItems(models)
             combo.setCurrentText(current)
 
+    def _load_requesty_models(self):
+        self.refresh_requesty_models.setEnabled(False)
+        self.models_label.setText(t("Fetching model list…"))
+        key, base = self._typed_key("requesty")
+
+        def work():
+            try:
+                self._requesty_models_loaded.emit(api.requesty_models(key, base), "")
+            except api.ApiError as exc:
+                self._requesty_models_loaded.emit([], str(exc))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_requesty_models_loaded(self, models, error):
+        self.refresh_requesty_models.setEnabled(True)
+        if error:
+            self.models_label.setText(t("Could not fetch the list: {error}", error=error))
+            return
+        self._fill_requesty_boxes(models)
+        self.models_label.setText(t("{count} models loaded.", count=len(models)))
+
+    def _fill_requesty_boxes(self, models):
+        # The same arrangement as OpenCode Go: one key, one catalog, two boxes.
+        for combo in (self.cleanup_requesty_model, self.assistant_requesty_model):
+            current = combo.currentText()
+            combo.clear()
+            combo.addItems(models)
+            combo.setCurrentText(current)
+
     def _load_agy_models(self):
         """Ask Antigravity which models it offers, off the interface thread.
 
@@ -2870,12 +3220,23 @@ class SettingsWindow(QDialog):
         if gemini_key:
             jobs.append(("gemini",
                          lambda: api.gemini_models(gemini_key, gemini_base)))
+        deepseek_key = self.conf.deepseek_key()
+        deepseek_base = self.conf["deepseek_base_url"]
+        if deepseek_key:
+            jobs.append(("deepseek",
+                         lambda: api.openai_models(deepseek_key, deepseek_base,
+                                                   "DeepSeek")))
         opencode_key = self.conf.opencode_key()
         opencode_base = self.conf["opencode_base_url"]
         if opencode_key:
             jobs.append(("opencode",
                          lambda: api.openai_models(opencode_key, opencode_base,
                                                    "OpenCode Go")))
+        requesty_key = self.conf.requesty_key()
+        requesty_base = self.conf["requesty_base_url"]
+        if requesty_key:
+            jobs.append(("requesty",
+                         lambda: api.requesty_models(requesty_key, requesty_base)))
         for provider, fetch in jobs:
             def work(provider=provider, fetch=fetch):
                 try:
@@ -2890,6 +3251,15 @@ class SettingsWindow(QDialog):
     def _on_hosted_models_loaded(self, provider, models):
         if provider == "opencode":
             self._fill_opencode_boxes(models)
+            return
+        if provider == "deepseek":
+            current = self.cleanup_deepseek_model.currentText()
+            self.cleanup_deepseek_model.clear()
+            self.cleanup_deepseek_model.addItems(models)
+            self.cleanup_deepseek_model.setCurrentText(current)
+            return
+        if provider == "requesty":
+            self._fill_requesty_boxes(models)
             return
         combos = ((self.cleanup_model, self.meeting_model)
                   if provider == "openrouter" else (self.cleanup_gemini_model,))
@@ -2924,11 +3294,25 @@ class SettingsWindow(QDialog):
             count=len(api.gemini_models(key, base)),
         ))
 
+    def _test_deepseek(self):
+        key, base = self._typed_key("deepseek")
+        self._test_key("deepseek", lambda: t(
+            "Connection works. {count} models visible.",
+            count=len(api.openai_models(key, base, "DeepSeek")),
+        ))
+
     def _test_opencode(self):
         key, base = self._typed_key("opencode")
         self._test_key("opencode", lambda: t(
             "Connection works. {count} models visible.",
             count=len(api.openai_models(key, base, "OpenCode Go")),
+        ))
+
+    def _test_requesty(self):
+        key, base = self._typed_key("requesty")
+        self._test_key("requesty", lambda: t(
+            "Connection works. {count} models visible.",
+            count=len(api.openai_models(key, base, "Requesty")),
         ))
 
     def _typed_key(self, provider):
@@ -3166,12 +3550,16 @@ class SettingsWindow(QDialog):
                                         provider == "openrouter")
         self.cleanup_form.setRowVisible(self.cleanup_gemini_model_row,
                                         provider == "gemini")
+        self.cleanup_form.setRowVisible(self.cleanup_deepseek_model_row,
+                                        provider == "deepseek")
         self.cleanup_form.setRowVisible(self.cleanup_claude_model,
                                         provider == "claude")
         self.cleanup_form.setRowVisible(self.cleanup_codex_model,
                                         provider == "codex")
         self.cleanup_form.setRowVisible(self.cleanup_opencode_model_row,
                                         provider == "opencode")
+        self.cleanup_form.setRowVisible(self.cleanup_requesty_model_row,
+                                        provider == "requesty")
         self.cleanup_form.setRowVisible(self.cleanup_agy_model,
                                         provider == "agy")
         self.cleanup_form.setRowVisible(self.cleanup_reasoning,
@@ -3188,6 +3576,10 @@ class SettingsWindow(QDialog):
             self.models_label.setText(t("Runs on Google AI Studio."))
         elif provider == "opencode":
             self.models_label.setText(t("Runs on OpenCode Go."))
+        elif provider == "deepseek":
+            self.models_label.setText(t("Runs on DeepSeek."))
+        elif provider == "requesty":
+            self.models_label.setText(t("Runs on Requesty."))
         elif not binary:
             self.models_label.setText(t("Runs on OpenRouter."))
         elif found:
@@ -3206,6 +3598,7 @@ class SettingsWindow(QDialog):
         self.openrouter_box.setVisible(provider == "openrouter")
         self.agy_box.setVisible(provider == "agy")
         self.opencode_box.setVisible(provider == "opencode")
+        self.requesty_box.setVisible(provider == "requesty")
         self._refresh_assistant_status()
 
     def _refresh_assistant_status(self):
@@ -3216,6 +3609,10 @@ class SettingsWindow(QDialog):
             if provider == "opencode":
                 self.assistant_found.setText(
                     t("Needs no program installed, only an OpenCode Go key.")
+                )
+            elif provider == "requesty":
+                self.assistant_found.setText(
+                    t("Needs no program installed, only a Requesty key.")
                 )
             else:
                 self.assistant_found.setText(

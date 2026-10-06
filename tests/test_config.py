@@ -19,6 +19,7 @@ from dikte import api
 from dikte import cleanup
 from dikte import config as cfg
 from dikte import ggml
+from dikte import hardware
 from dikte import i18n
 from dikte import paste
 from tests.support import DikteTest
@@ -32,6 +33,18 @@ class Loading(DikteTest):
     def test_a_stored_value_wins(self):
         self.write_config({"cleanup_model": "some/other-model"})
         self.assertEqual(cfg.Config()["cleanup_model"], "some/other-model")
+
+    def test_invalid_saved_local_threads_recover_as_automatic(self):
+        for value in ("not-a-number", None, [], -3, float("inf"), True, 3.5):
+            with self.subTest(value=value):
+                self.write_config({"local_threads": value})
+                self.assertEqual(cfg.Config()["local_threads"], 0)
+
+    def test_the_old_gpu_checkbox_migrates_to_a_processing_device(self):
+        for old_value, expected in ((True, "auto"), (False, "cpu")):
+            with self.subTest(local_gpu=old_value):
+                self.write_config({"local_gpu": old_value})
+                self.assertEqual(cfg.Config()["local_device"], expected)
 
     def test_a_key_this_version_does_not_have_is_dropped(self):
         """A setting from a fork, or from a version that removed it."""
@@ -191,6 +204,8 @@ class Keys(DikteTest):
             self.assertEqual(cfg.Config().gemini_key(), "AIza-env")
         with mock.patch.dict(os.environ, {"OPENCODE_API_KEY": "opencode-env"}):
             self.assertEqual(cfg.Config().opencode_key(), "opencode-env")
+        with mock.patch.dict(os.environ, {"REQUESTY_API_KEY": "rqsty-env"}):
+            self.assertEqual(cfg.Config().requesty_key(), "rqsty-env")
 
 
 class TranscribeTarget(DikteTest):
@@ -221,6 +236,16 @@ class TranscribeTarget(DikteTest):
         self.assertEqual(target.api_key, "sk-or-test")
         self.assertEqual(target.model, "openai/whisper-1")
         self.assertEqual(target.file_model, "")
+
+    def test_requesty_when_it_is_picked(self):
+        conf = self.config(transcribe_provider="requesty",
+                           requesty_api_key="rqsty-test")
+        target = conf.transcribe_target()
+        self.assertEqual(target.provider, "requesty")
+        self.assertEqual(target.service, "Requesty")
+        self.assertEqual(target.api_key, "rqsty-test")
+        self.assertEqual(target.base_url, "https://router.requesty.ai/v1")
+        self.assertEqual(target.model, "openai/gpt-4o-transcribe")
 
     def test_openrouter_carries_its_file_model(self):
         conf = self.config(transcribe_provider="openrouter",
@@ -703,18 +728,35 @@ class Defaults(unittest.TestCase):
         self.assertEqual(cfg.DEFAULTS["openai_api_key"], "")
         self.assertEqual(cfg.DEFAULTS["openrouter_api_key"], "")
         self.assertEqual(cfg.DEFAULTS["gemini_api_key"], "")
+        self.assertEqual(cfg.DEFAULTS["deepseek_api_key"], "")
         self.assertEqual(cfg.DEFAULTS["opencode_api_key"], "")
+        self.assertEqual(cfg.DEFAULTS["requesty_api_key"], "")
 
     def test_google_ai_studio_is_a_cleanup_provider_and_not_a_transcriber(self):
         """Its compatible endpoint has no /audio/transcriptions behind it."""
         self.assertNotIn("gemini", cfg.TRANSCRIBERS)
         self.assertIn("gemini", cleanup.PROVIDERS)
 
+    def test_deepseek_is_a_cleanup_provider_and_not_a_transcriber(self):
+        self.assertNotIn("deepseek", cfg.TRANSCRIBERS)
+        self.assertIn("deepseek", cleanup.PROVIDERS)
+        self.assertEqual(cfg.DEFAULTS["deepseek_base_url"],
+                         "https://api.deepseek.com")
+        self.assertEqual(cfg.DEFAULTS["cleanup_deepseek_model"], "deepseek-flash")
+
     def test_opencode_ships_on_its_own_endpoint(self):
         self.assertEqual(cfg.DEFAULTS["opencode_base_url"],
                          "https://opencode.ai/zen/go/v1")
         self.assertEqual(cfg.DEFAULTS["cleanup_opencode_model"], "deepseek-v4-flash")
         self.assertEqual(cfg.DEFAULTS["assistant_opencode_model"], "deepseek-v4-flash")
+
+    def test_requesty_ships_on_its_own_endpoint_and_is_never_the_default(self):
+        self.assertEqual(cfg.DEFAULTS["requesty_base_url"],
+                         "https://router.requesty.ai/v1")
+        self.assertIn("requesty", cfg.TRANSCRIBERS)
+        self.assertNotEqual(cfg.DEFAULTS["transcribe_provider"], "requesty")
+        self.assertNotEqual(cfg.DEFAULTS["cleanup_provider"], "requesty")
+        self.assertNotEqual(cfg.DEFAULTS["assistant_provider"], "requesty")
 
     def test_every_language_specific_prompt_has_both_languages(self):
         for name in ("CLEANUP_PROMPT", "FILE_CLEANUP_PROMPT", "MEETING_PROMPT",
@@ -794,12 +836,45 @@ class ReadyToRun(DikteTest):
         conf = self.config(local_model="ggml-base.bin", local_threads=4,
                            local_gpu=False, local_llm_model="gemma.gguf",
                            local_llm_context=4096)
-        conf.apply_local()
+        with mock.patch.object(hardware, "cpu_threads", return_value=8):
+            conf.apply_local()
         self.addCleanup(ggml.whisper.configure, model="", threads=0, gpu=True)
         self.assertEqual(ggml.whisper.settings()["model"], "ggml-base.bin")
         self.assertEqual(ggml.whisper.settings()["threads"], 4)
         self.assertFalse(ggml.whisper.settings()["gpu"])
         self.assertEqual(ggml.llm.settings()["context"], 4096)
+
+    def test_the_processing_device_reaches_the_whisper_server(self):
+        identifier = "vulkan:00112233445566778899aabbccddeeff"
+        conf = self.config(local_device=identifier)
+        conf.apply_local()
+        self.addCleanup(ggml.whisper.configure, device="auto")
+        self.assertEqual(ggml.whisper.settings()["device"], identifier)
+
+    def test_an_oversized_thread_preference_is_bounded_only_at_runtime(self):
+        conf = self.config(local_threads=30)
+        with mock.patch.object(hardware, "cpu_threads", return_value=8):
+            conf.apply_local()
+        self.addCleanup(ggml.whisper.configure, threads=0)
+        self.assertEqual(ggml.whisper.settings()["threads"], 8)
+        self.assertEqual(conf["local_threads"], 30)
+
+    def test_automatic_threads_stays_automatic_at_runtime(self):
+        conf = self.config(local_threads=0)
+        with mock.patch.object(hardware, "cpu_threads", return_value=8):
+            conf.apply_local()
+        self.addCleanup(ggml.whisper.configure, threads=0)
+        self.assertEqual(ggml.whisper.settings()["threads"], 0)
+
+    def test_the_processing_device_is_the_source_of_truth_over_the_old_checkbox(self):
+        for selection, old_gpu, expected_gpu in (
+                ("cpu", True, False),
+                ("vulkan:00112233445566778899aabbccddeeff", False, True)):
+            with self.subTest(selection=selection):
+                conf = self.config(local_device=selection, local_gpu=old_gpu)
+                conf.apply_local()
+                self.assertEqual(ggml.whisper.settings()["gpu"], expected_gpu)
+        self.addCleanup(ggml.whisper.configure, gpu=True, device="auto")
 
     def test_the_idle_window_is_in_seconds(self):
         conf = self.config(local_idle_unload=True, local_idle_minutes=15)

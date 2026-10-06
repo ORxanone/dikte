@@ -1,0 +1,43 @@
+name: macOS native smoke
+
+on:
+  pull_request:
+    paths:
+      - scripts/native-macos-smoke.py
+      - scripts/install-mac.sh
+      - scripts/update.sh
+      - scripts/uninstall.sh
+      - dikte/ipc.py
+      - dikte/app.py
+      - .github/workflows/macos-native.yml
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15-intel, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --quiet PyQt6
+      - name: Generated wrappers and native platform integration tests
+        run: python -m unittest -v tests.test_security_paths tests.test_ipc tests.test_integrate tests.test_app_start
+      - name: Compile, sign, launch Cocoa and exercise native IPC restart
+        run: python scripts/native-macos-smoke.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: native-macos-${{ matrix.os }}
+          path: native-macos-results/
+          if-no-files-found: warn
+          retention-days: 7

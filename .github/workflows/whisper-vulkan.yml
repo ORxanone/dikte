@@ -1,9 +1,9 @@
 name: whisper.cpp Vulkan bundle
 
 # Only what the bundle is built from. Compiling the Vulkan shaders takes
-# tens of minutes, and a README typo is not worth one: what ties ggml.py to
-# this release is a handful of assertions in tests/test_packaging.py, and
-# those run on every pull request in milliseconds.
+# tens of minutes, and a README typo is not worth one. The dependency bundle
+# can be reviewed and published before the installer switches to it; both
+# contracts are covered by tests/test_packaging.py.
 on:
   pull_request:
     paths:
@@ -14,12 +14,12 @@ on:
       whisper_version:
         description: Upstream whisper.cpp version (without v)
         required: true
-        default: "1.9.3"
+        default: "1.9.4"
         type: string
       whisper_commit:
         description: Peeled commit SHA for that reviewed upstream tag
         required: true
-        default: "371b5a7561823ab2bb32142d2751e35e7534727b"
+        default: "927cfce34f31707e17f2bff35c349632fb9e2c3a"
         type: string
       expected_sha256:
         description: >-
@@ -43,10 +43,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  WHISPER_VERSION: ${{ inputs.whisper_version || '1.9.3' }}
-  WHISPER_COMMIT: ${{ inputs.whisper_commit || '371b5a7561823ab2bb32142d2751e35e7534727b' }}
-  REVIEWED_WHISPER_VERSION: "1.9.3"
-  REVIEWED_WHISPER_SHA256: c25ca76504144da488eb74441390a7b9aa7ce547e5f2f391cbd831253c9b54d8
+  WHISPER_VERSION: ${{ inputs.whisper_version || '1.9.4' }}
+  WHISPER_COMMIT: ${{ inputs.whisper_commit || '927cfce34f31707e17f2bff35c349632fb9e2c3a' }}
+  REVIEWED_WHISPER_VERSION: "1.9.4"
+  REVIEWED_WHISPER_SHA256: 381ec8f07071d616e243b94d275e29763d6d2b4c7204017c166caf389e1f2349
 
 jobs:
   build:
@@ -54,7 +54,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Check out Dikte
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -66,7 +66,7 @@ jobs:
           [[ "$WHISPER_COMMIT" =~ ^[0-9a-f]{40}$ ]]
 
       - name: Check out pinned whisper.cpp source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ggml-org/whisper.cpp
           ref: ${{ env.WHISPER_COMMIT }}
@@ -128,7 +128,9 @@ jobs:
           test "$actual" = "$expected"
 
       - name: Validate archive and ELF contract
-        run: OUT_DIR=dist packaging/whisper-vulkan/validate-package.sh
+        run: >-
+          OUT_DIR=dist SOURCE_DIR=vendor/whisper.cpp
+          packaging/whisper-vulkan/validate-package.sh
 
       - name: Schema-validate CycloneDX 1.6 SBOM
         run: |
@@ -148,7 +150,7 @@ jobs:
         run: OUT_DIR=dist packaging/whisper-vulkan/smoke-runtime.sh vulkan
 
       - name: Upload reviewed outputs
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: whisper-bin-ubuntu-vulkan-x64
           path: dist/*
@@ -169,7 +171,7 @@ jobs:
       artifact-metadata: write
     steps:
       - name: Download the exact tested outputs
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: whisper-bin-ubuntu-vulkan-x64
           path: dist
@@ -178,12 +180,12 @@ jobs:
         run: (cd dist && sha256sum --check whisper-bin-ubuntu-vulkan-x64.tar.gz.sha256)
 
       - name: Attest build provenance
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: dist/whisper-bin-ubuntu-vulkan-x64.tar.gz
 
       - name: Attest SBOM to archive
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: dist/whisper-bin-ubuntu-vulkan-x64.tar.gz
           sbom-path: dist/whisper-bin-ubuntu-vulkan-x64.cdx.json

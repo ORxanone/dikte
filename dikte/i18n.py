@@ -42,13 +42,13 @@ def t(text, /, **kwargs):
 _TR_CASES = {
     "dative": {
         "Claude": "Claude'a", "Codex": "Codex'e", "OpenRouter": "OpenRouter'a",
-        "Google AI Studio": "Google AI Studio'ya", "Antigravity": "Antigravity'ye",
-        "OpenCode Go": "OpenCode Go'ya",
+        "Google AI Studio": "Google AI Studio'ya", "DeepSeek": "DeepSeek'e",
+        "Antigravity": "Antigravity'ye", "OpenCode Go": "OpenCode Go'ya", "Requesty": "Requesty'ye",
     },
     "accusative": {
         "Claude": "Claude'u", "Codex": "Codex'i", "OpenRouter": "OpenRouter'ı",
-        "Google AI Studio": "Google AI Studio'yu", "Antigravity": "Antigravity'yi",
-        "OpenCode Go": "OpenCode Go'yu",
+        "Google AI Studio": "Google AI Studio'yu", "DeepSeek": "DeepSeek'i",
+        "Antigravity": "Antigravity'yi", "OpenCode Go": "OpenCode Go'yu", "Requesty": "Requesty'yi",
     },
 }
 
@@ -220,12 +220,15 @@ TR = {
     "Could not connect: {reason}": "Bağlantı kurulamadı: {reason}",
     "Could not parse the response: {error}": "Yanıt çözümlenemedi: {error}",
 
-    "whisper.cpp has no macOS build, and Homebrew's leaves out the server. "
-    "Build whisper-server yourself and give its path here, or transcribe in "
-    "the cloud. See the README.":
-        "whisper.cpp'nin macOS sürümü yok, Homebrew'unki de sunucuyu dışarıda "
-        "bırakıyor. whisper-server'ı kendin derleyip yolunu buraya yaz, ya da "
-        "buluta çevir. README'ye bak.",
+    "whisper.cpp has no macOS build, and Homebrew's leaves out the "
+    "server. Build it (cmake -B build -DWHISPER_BUILD_SERVER=ON "
+    "-DGGML_METAL=ON && cmake --build build -j), put the binary "
+    "on the PATH, or transcribe in the cloud. See the README.":
+        "whisper.cpp'nin macOS için hazır paketi yok; Homebrew paketi de "
+        "sunucuyu içermiyor. Sunucuyu derle (cmake -B build "
+        "-DWHISPER_BUILD_SERVER=ON -DGGML_METAL=ON && cmake --build build -j) "
+        "ve whisper-server dosyasını PATH üzerindeki bir dizine koy "
+        "veya bulutta transkripsiyon yap. README'ye bak.",
 
     # --- settings: tabs and general ------------------------------------
     "Dikte Settings": "Dikte Ayarları",
@@ -280,6 +283,11 @@ TR = {
     # --- updates --------------------------------------------------------
     "Updates": "Güncelleme",
     "Look for a newer version once a day": "Günde bir kez yeni sürüm var mı diye bak",
+    "Start in the tray when I log in": "Oturum açınca tepside başlat",
+    "Only the start at login. Opening Dikte from the menu always shows the "
+    "window, and so does a first start that still needs setting up.":
+        "Yalnızca oturum açılışındaki başlatma için. Dikte'yi menüden açmak "
+        "pencereyi her zaman gösterir; kurulumu bitmemiş ilk açılış da öyle.",
     "Dikte only looks. What it finds opens the release page in your browser; "
     "it downloads and installs nothing by itself.":
         "Dikte yalnızca bakar. Bulduğu şey tarayıcında sürüm sayfasını açar; "
@@ -312,12 +320,16 @@ TR = {
     "gsk_… (falls back to GROQ_API_KEY)": "gsk_… (boşsa GROQ_API_KEY kullanılır)",
     "sk-or-… (falls back to OPENROUTER_API_KEY)": "sk-or-… (boşsa OPENROUTER_API_KEY kullanılır)",
     "(falls back to GEMINI_API_KEY)": "(boşsa GEMINI_API_KEY kullanılır)",
+    "(falls back to DEEPSEEK_API_KEY)": "(boşsa DEEPSEEK_API_KEY kullanılır)",
     "(falls back to OPENCODE_API_KEY)": "(boşsa OPENCODE_API_KEY kullanılır)",
+    "(falls back to REQUESTY_API_KEY)": "(boşsa REQUESTY_API_KEY kullanılır)",
     "Test": "Test et",
     "Trying…": "Deneniyor…",
     "Runs on OpenRouter.": "OpenRouter üzerinde çalışır.",
     "Runs on Google AI Studio.": "Google AI Studio üzerinde çalışır.",
+    "Runs on DeepSeek.": "DeepSeek üzerinde çalışır.",
     "Runs on OpenCode Go.": "OpenCode Go üzerinde çalışır.",
+    "Runs on Requesty.": "Requesty üzerinde çalışır.",
     "Connection works. {count} audio models visible.":
         "Bağlantı tamam. {count} ses modeli görünüyor.",
     "Connection works. {count} models visible.":
@@ -629,6 +641,17 @@ TR = {
         "Yukarıdaki çalışma dizini ve izinler burada bir şey ifade etmez.",
     "Needs no program installed, only an OpenCode Go key.":
         "Kurulu bir programa değil, yalnızca bir OpenCode Go anahtarına ihtiyaç duyar.",
+    "A plain question and a plain answer, over the Requesty key you already "
+    "have. It runs no commands, opens no files and reaches none of your "
+    "services, so it can tell you what the capital of Peru is but not what is "
+    "in your calendar. Working directory and permissions above mean nothing "
+    "here.":
+        "Elindeki Requesty anahtarı üzerinden düz bir soru ve düz bir cevap. "
+        "Komut çalıştırmaz, dosya açmaz, servislerinin hiçbirine erişmez; yani "
+        "Peru'nun başkentini söyler ama takviminde ne olduğunu söyleyemez. "
+        "Yukarıdaki çalışma dizini ve izinler burada bir şey ifade etmez.",
+    "Needs no program installed, only a Requesty key.":
+        "Kurulu bir programa değil, yalnızca bir Requesty anahtarına ihtiyaç duyar.",
     "Antigravity has neither a permission mode nor a sandbox to hand it, so "
     "what it may do without asking is whatever its own allow-rules say. The "
     "Permissions and Sandbox boxes above belong to the other two; the working "
@@ -1080,4 +1103,39 @@ TR = {
     "The recording stopped on its own; transcribing what was captured.":
         "Kayıt kendi kendine durdu; yakalanan kısım yazıya dökülüyor.",
     "Could not save the settings: {error}": "Ayarlar kaydedilemedi: {error}",
+    "The provider returned an invalid model catalog.": "Sağlayıcı geçersiz bir model listesi döndürdü.",
+    # Local processing and verified device selection.
+    "A specific graphics card can only be selected with Dikte's managed Vulkan program. Choose Automatic or Processor in Settings.": "Belirli bir ekran kartı yalnızca Dikte'nin yönettiği Vulkan programıyla seçilebilir. Ayarlar'dan Otomatik veya İşlemci'yi seç.",
+    "Advanced": "Gelişmiş",
+    "Automatic (whisper.cpp default)": "Otomatik (whisper.cpp varsayılanı)",
+    "Automatic lets whisper.cpp choose a graphics card when its build supports one. Processor keeps all speech recognition on the CPU.": "Otomatik seçeneği, kullanılan derleme destekliyorsa ekran kartını whisper.cpp'nin seçmesini sağlar. İşlemci seçeneğinde tüm konuşma tanıma işlemi CPU üzerinde yapılır.",
+    "CPU threads": "İşlemci iş parçacıkları",
+    "CPU-thread limit available to this process: {count}. Automatic lets whisper.cpp choose. More threads are not always faster.": "Bu işlem için kullanılabilir iş parçacığı sınırı: {count}. Otomatik seçeneğinde sayıyı whisper.cpp belirler. Daha fazla iş parçacığı her zaman daha hızlı değildir.",
+    "Custom program unavailable: {path}": "Özel program kullanılamıyor: {path}",
+    "Detected graphics: {devices}. {reason} Automatic may still use a graphics card if the program supports it.": "Algılanan ekran kartları: {devices}. {reason} Program destekliyorsa Otomatik seçeneği yine de ekran kartı kullanabilir.",
+    "Download failed: {error}": "İndirme başarısız: {error}",
+    "Downloaded: {name}, version {version}.": "İndirildi: {name}, sürüm {version}.",
+    "Downloaded: {name}, version {version}. There was no Vulkan build, so this one runs on the processor.": "İndirildi: {name}, sürüm {version}. Vulkan derlemesi bulunamadığı için bu sürüm işlemci üzerinde çalışır.",
+    "GGML_VK_VISIBLE_DEVICES overrides graphics visibility.": "GGML_VK_VISIBLE_DEVICES, hangi ekran kartlarının görüneceğini belirliyor.",
+    "Graphics: Processor only.": "Grafik işlem: Yalnızca işlemci.",
+    "Graphics: {devices}.": "Ekran kartları: {devices}.",
+    "Memory: {memory}.": "Bellek: {memory}.",
+    "Previously selected graphics card (unavailable)": "Önceden seçilen ekran kartı (kullanılamıyor)",
+    "Processing device": "İşlem aygıtı",
+    "Processor (CPU)": "İşlemci (CPU)",
+    "Selected: Automatic.": "Seçili: Otomatik.",
+    "Selected: Graphics card unavailable.": "Seçili: Ekran kartı kullanılamıyor.",
+    "Selected: Processor (CPU).": "Seçili: İşlemci (CPU).",
+    "Selected: {name}.": "Seçili: {name}.",
+    "The program's graphics device mapping could not be verified.": "Programın ekran kartı eşlemesi doğrulanamadı.",
+    "The saved processing device is invalid. Choose a device in Settings.": "Kayıtlı işlem aygıtı geçersiz. Ayarlar'dan bir aygıt seç.",
+    "The selected custom or unmanaged program does not provide verified explicit graphics selection.": "Seçilen özel veya Dikte'nin yönetmediği program, doğrulanmış ekran kartı seçimini desteklemiyor.",
+    "The selected graphics card is not available. Choose another processing device in Settings.": "Seçilen ekran kartı kullanılamıyor. Ayarlar'dan başka bir işlem aygıtı seç.",
+    "Use automatic selection": "Otomatik seçimi kullan",
+    "dedicated": "ayrılmış",
+    "shared": "paylaşımlı",
+    "{name} ({size} {kind})": "{name} ({size} {kind})",
+    "{size} system": "{size} sistem belleği",
+    "{size} {kind} graphics": "{size} {kind} ekran kartı belleği",
+
 }

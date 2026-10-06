@@ -10,6 +10,7 @@ import time
 
 from . import api
 from . import ggml
+from . import hardware
 from . import i18n
 from . import paste
 from . import paths
@@ -666,10 +667,15 @@ DEFAULTS = {
     "groq_base_url": "https://api.groq.com/openai/v1",
     "openrouter_api_key": "",
     "openrouter_base_url": "https://openrouter.ai/api/v1",
+    "requesty_api_key": "",
+    # https://router.eu.requesty.ai/v1 keeps the requests in the EU.
+    "requesty_base_url": "https://router.requesty.ai/v1",
     "gemini_api_key": "",
     # Google's OpenAI-compatible endpoint. Cleanup only: there is no
     # /audio/transcriptions behind it, so it is not one of the TRANSCRIBERS.
     "gemini_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "deepseek_api_key": "",
+    "deepseek_base_url": "https://api.deepseek.com",
     "opencode_api_key": "",
     "opencode_base_url": "https://opencode.ai/zen/go/v1",
     "transcribe_provider": "local",  # "local", or a key of TRANSCRIBERS
@@ -679,6 +685,7 @@ DEFAULTS = {
     # What a timestamped run (subtitles) asks OpenRouter for: not every model
     # there returns segment times. Empty -> openai/whisper-1.
     "openrouter_file_model": "",
+    "requesty_transcribe_model": "openai/gpt-4o-transcribe",
     # A stored language overrides this default. Hosted providers receive no
     # language hint in auto mode; local whisper also reports the detected code.
     "language": "auto",
@@ -692,7 +699,8 @@ DEFAULTS = {
     # opens with the Download button already on the right model.
     "local_model": ggml.SUGGESTED_WHISPER,
     "local_threads": 0,             # 0 -> whisper.cpp picks
-    "local_gpu": True,
+    "local_gpu": True,               # retained for older settings files
+    "local_device": "auto",          # auto | cpu | stable Vulkan device UUID
     "local_preload": True,          # load the model while Dikte starts, rather
                                     # than on the first dictation
     "local_binary": "",             # empty -> whichever copy ggml.py finds
@@ -703,8 +711,10 @@ DEFAULTS = {
     "cleanup_claude_model": "haiku",   # Claude Code: an alias, or a full model id
     "cleanup_codex_model": "",         # empty -> whatever Codex is set to
     "cleanup_gemini_model": "gemini-3.5-flash-lite",
+    "cleanup_deepseek_model": "deepseek-flash",
     "cleanup_agy_model": "",           # empty -> whatever Antigravity is set to
     "cleanup_opencode_model": "deepseek-v4-flash",
+    "cleanup_requesty_model": "google/gemini-3.5-flash-lite",
     "cleanup_reasoning": "",        # empty -> whatever the model does by default
 
     # --- llama.cpp, on this machine -----------------------------------------
@@ -768,6 +778,9 @@ DEFAULTS = {
     # A look at the releases page once a day, and nothing more than a look:
     # what is found opens a browser, never an installer.
     "update_check": True,
+    # A start at login goes straight to the tray, and the window waits for a
+    # click. Off, the login start opens the window the way a menu click does.
+    "start_in_tray": True,
     "file_timestamps": False,
     "file_cleanup": True,
     "file_cleanup_prompt": "",      # empty -> language-specific default
@@ -798,6 +811,7 @@ DEFAULTS = {
     "assistant_openrouter_model": "google/gemini-3.5-flash",
     "assistant_agy_model": "",      # empty -> whatever Antigravity is set to
     "assistant_opencode_model": "deepseek-v4-flash",
+    "assistant_requesty_model": "google/gemini-3.5-flash",
     "assistant_reasoning": "",      # empty -> the model's own default
     "assistant_dir": "",            # empty -> the home directory
     "assistant_prompt": "",         # empty -> language-specific default
@@ -838,6 +852,8 @@ TRANSCRIBERS = {
                         "groq_transcribe_model"),
     "openrouter": Transcriber("OpenRouter", "openrouter_api_key",
                               "openrouter_base_url", "openrouter_transcribe_model"),
+    "requesty": Transcriber("Requesty", "requesty_api_key",
+                            "requesty_base_url", "requesty_transcribe_model"),
 }
 
 # One lock for the history file and the meeting index both, rather than one
@@ -871,17 +887,31 @@ _CORNER_MIGRATION = {
 }
 
 
+def _local_thread_count(value):
+    """A stored whole manual count, or Automatic for malformed values."""
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        return 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 class Config:
     def __init__(self):
         self.data = dict(DEFAULTS)
         self.load()
 
     def load(self):
+        stored = {}
         try:
             with open(CONFIG_FILE, encoding="utf-8") as fh:
                 stored = json.load(fh)
             if isinstance(stored, dict):
                 self.data.update({k: v for k, v in stored.items() if k in DEFAULTS})
+                self.data["local_threads"] = _local_thread_count(
+                    self.data["local_threads"]
+                )
         except FileNotFoundError:
             pass
         except json.JSONDecodeError as exc:
@@ -898,6 +928,10 @@ class Config:
                   f"the unreadable file was kept as {broken}")
         except OSError as exc:
             print(f"dikte: could not read settings ({exc}), using defaults")
+        if not isinstance(stored, dict) or "local_device" not in stored:
+            self.data["local_device"] = (
+                "auto" if self.data["local_gpu"] else "cpu"
+            )
         self.data["overlay_corner"] = _CORNER_MIGRATION.get(
             self.data["overlay_corner"], self.data["overlay_corner"]
         )
@@ -945,8 +979,14 @@ class Config:
     def gemini_key(self):
         return self.api_key("gemini_api_key")
 
+    def deepseek_key(self):
+        return self.api_key("deepseek_api_key")
+
     def opencode_key(self):
         return self.api_key("opencode_api_key")
+
+    def requesty_key(self):
+        return self.api_key("requesty_api_key")
 
     def transcribe_target(self):
         """Key, endpoint and model for whichever provider does speech to text.
@@ -989,10 +1029,17 @@ class Config:
 
     def apply_local(self):
         """Hand the local settings to the servers, restarting what they change."""
+        device = self["local_device"]
+        if device == "auto" and not self["local_gpu"]:
+            device = "cpu"
+        requested_threads = _local_thread_count(self["local_threads"])
+        threads = (min(requested_threads, hardware.cpu_threads())
+                   if requested_threads else 0)
         ggml.whisper.configure(
             model=self["local_model"],
-            threads=int(self["local_threads"]),
-            gpu=bool(self["local_gpu"]),
+            threads=threads,
+            gpu=device != "cpu",
+            device=device,
             binary=self["local_binary"],
         )
         ggml.llm.configure(

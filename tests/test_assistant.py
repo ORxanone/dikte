@@ -100,6 +100,7 @@ class Provider(DikteTest):
         self.assertEqual(assistant.executable("agy"), "agy")
         self.assertEqual(assistant.executable("openrouter"), "")
         self.assertEqual(assistant.executable("opencode"), "")
+        self.assertEqual(assistant.executable("requesty"), "")
 
     def test_the_model_recorded_is_the_one_that_answered(self):
         """The history used to write Claude's setting whoever had answered."""
@@ -120,7 +121,8 @@ class Provider(DikteTest):
         self.assertEqual(assistant.display_name(self.config()), "Claude")
         for name, called in (("codex", "Codex"), ("agy", "Antigravity"),
                              ("openrouter", "OpenRouter"),
-                             ("opencode", "OpenCode Go")):
+                             ("opencode", "OpenCode Go"),
+                             ("requesty", "Requesty")):
             with self.subTest(name=name):
                 self.assertEqual(
                     assistant.display_name(self.config(assistant_provider=name)),
@@ -769,6 +771,44 @@ class AskOpenCode(DikteTest):
 
     def test_an_api_failure_reads_as_an_assistant_failure(self):
         conf = self.config(assistant_provider="opencode")
+        with self.assertRaises(assistant.AssistantError):
+            assistant.ask("when is it", conf)
+
+
+class AskRequesty(DikteTest):
+    def test_a_question_and_an_answer(self):
+        conf = self.config(assistant_provider="requesty",
+                           requesty_api_key="rqsty-test-key")
+        with fake_urlopen({"choices": [{"message": {"content": "on Thursday"}}]}):
+            answer, warning = assistant.ask("when is it", conf)
+        self.assertEqual(answer, "on Thursday")
+        self.assertEqual(warning, "")
+
+    def test_the_conversation_is_ours_to_keep(self):
+        conf = self.config(assistant_provider="requesty",
+                           requesty_api_key="rqsty-test-key")
+        with fake_urlopen({"choices": [{"message": {"content": "on Thursday"}}]}):
+            assistant.ask("when is it", conf)
+        stored = assistant.read_messages("requesty", 1800)
+        self.assertEqual([row["content"] for row in stored],
+                         ["when is it", "on Thursday"])
+
+    def test_the_model_key_and_endpoint_are_requesty_s_own(self):
+        conf = self.config(assistant_provider="requesty",
+                           requesty_api_key="rqsty-test-key",
+                           requesty_base_url="https://router.eu.requesty.ai/v1",
+                           assistant_requesty_model="gpt-5.4-mini")
+        with fake_urlopen({"choices": [{"message": {"content": "on Thursday"}}]}) as calls:
+            assistant.ask("when is it", conf)
+        sent = json.loads(calls[0].data.decode("utf-8"))
+        self.assertEqual(sent["model"], "gpt-5.4-mini")
+        self.assertEqual(calls[0].get_header("Authorization"), "Bearer rqsty-test-key")
+        self.assertIn("https://router.eu.requesty.ai/v1/chat/completions",
+                      calls[0].full_url)
+        self.assertEqual(assistant.model(conf), "gpt-5.4-mini")
+
+    def test_an_api_failure_reads_as_an_assistant_failure(self):
+        conf = self.config(assistant_provider="requesty")
         with self.assertRaises(assistant.AssistantError):
             assistant.ask("when is it", conf)
 

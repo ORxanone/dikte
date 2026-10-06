@@ -22,6 +22,7 @@ from dikte import audio
 from dikte import cleanup
 from dikte import config as cfg
 from dikte import ggml
+from dikte import hardware
 from dikte import hotkey
 from dikte import hub
 from dikte import ipc
@@ -36,6 +37,9 @@ from tests.support import DikteTest, only_these_tools
 # in a test never calls anybody; taken here, before any test runs, so the two
 # tests about what it does when called still have the real one.
 REAL_LOAD_HOSTED_MODELS = settings_ui.SettingsWindow._load_hosted_models
+REAL_REFRESH_PROCESSING_DEVICES = (
+    settings_ui.SettingsWindow._refresh_processing_devices
+)
 
 # One application for the whole run; Qt allows no second one.
 _app = QApplication.instance() or QApplication([])
@@ -58,24 +62,31 @@ CHANGED = {
     "silence_db": -42.0,
     "filter_hallucinations": False,
     "keep_audio": True,
+    "start_in_tray": False,
     "openai_api_key": "sk-test-key",
     "groq_api_key": "gsk-test-key",
     "openrouter_api_key": "sk-or-test-key",
     "gemini_api_key": "AIza-test-key",
+    "deepseek_api_key": "sk-deepseek-test-key",
+    "requesty_api_key": "rqsty-test-key",
     "transcribe_provider": "openrouter",
     "transcribe_model": "whisper-1",
     "groq_transcribe_model": "whisper-large-v3",
     "openrouter_transcribe_model": "openai/whisper-1",
+    "requesty_transcribe_model": "openai/whisper-1",
     "cleanup_enabled": False,
     "cleanup_provider": "local",
     "cleanup_model": "some/other-model",
     "cleanup_claude_model": "opus",
     "cleanup_codex_model": "gpt-5",
     "cleanup_gemini_model": "gemini-2.5-flash",
+    "cleanup_deepseek_model": "deepseek-v4-pro",
     "cleanup_agy_model": "gemini-3.1-pro-low",
+    "cleanup_requesty_model": "gpt-5.4-mini",
     "cleanup_reasoning": "high",
     "local_model": "ggml-small.bin",
     "local_gpu": False,
+    "local_device": "cpu",
     "local_preload": False,
     "local_threads": 1,
     "local_llm_model": "gemma-3-4b-it-Q4_K_M.gguf",
@@ -95,6 +106,7 @@ CHANGED = {
     "assistant_codex_sandbox": "read-only",
     "assistant_openrouter_model": "some/agent-model",
     "assistant_agy_model": "gemini-3.1-pro-low",
+    "assistant_requesty_model": "deepseek-v4-flash",
     "assistant_reasoning": "high",
     "assistant_dir": "/tmp",
     "assistant_timeout": 600,
@@ -139,6 +151,9 @@ class Settings(DikteTest):
 
     def setUp(self):
         super().setUp()
+        # The round-trip fixture uses six CPU threads, independent of the
+        # test runner's CPU allocation. Hardware limits have separate tests.
+        self.enterContext(mock.patch.object(hardware, "cpu_threads", return_value=16))
         # No pactl, no model lists over the network, and no modal dialogue
         # waiting for somebody to press OK.
         self.enterContext(mock.patch.object(sys, "platform", self.platform))
@@ -156,6 +171,9 @@ class Settings(DikteTest):
                                             "_load_agy_models"))
         self.enterContext(mock.patch.object(settings_ui.SettingsWindow,
                                             "_load_hosted_models"))
+        self.enterContext(mock.patch.object(
+            settings_ui.SettingsWindow, "_refresh_processing_devices"
+        ))
         # The local model boxes fetch their own list the moment they are shown,
         # from a thread, which is nobody's test failing but a real request.
         self.enterContext(mock.patch.object(settings_ui.LocalModelBox,
@@ -178,6 +196,14 @@ class Settings(DikteTest):
                            QPoint(0, -120), Qt.MouseButton.NoButton,
                            Qt.KeyboardModifier.NoModifier,
                            Qt.ScrollPhase.NoScrollPhase, False)
+
+    def test_settings_is_not_tied_to_the_home_windows_desktop(self):
+        """A parentless dialog is transient for the whole application under
+        X11, and KWin then pulls the user to the home window's desktop."""
+        window = self.window(cfg.Config())
+        expected = (Qt.WindowType.Dialog if self.platform in ("darwin", "win32")
+                    else Qt.WindowType.Window)
+        self.assertEqual(window.windowType(), expected)
 
     def test_settings_keeps_configuration_and_exposes_separate_task_pages(self):
         window = self.window(cfg.Config())
@@ -362,7 +388,9 @@ class Settings(DikteTest):
         window = self.window(cfg.Config())
         boxes = {"openrouter": window.cleanup_model_row,
                  "opencode": window.cleanup_opencode_model_row,
+                 "requesty": window.cleanup_requesty_model_row,
                  "claude": window.cleanup_claude_model,
+                 "deepseek": window.cleanup_deepseek_model_row,
                  "codex": window.cleanup_codex_model}
         for provider, box in boxes.items():
             with self.subTest(provider=provider):
@@ -394,13 +422,16 @@ class Settings(DikteTest):
             window.file_model,
             window.cleanup_model,
             window.cleanup_gemini_model,
+            window.cleanup_deepseek_model,
             window.cleanup_opencode_model,
+            window.cleanup_requesty_model,
             window.cleanup_agy_model,
             window.cleanup_claude_model,
             window.cleanup_codex_model,
             window.assistant_model,
             window.assistant_agy_model,
             window.assistant_opencode_model,
+            window.assistant_requesty_model,
             window.assistant_codex_model,
             window.assistant_openrouter_model,
             window.meeting_model,
@@ -471,6 +502,35 @@ class Settings(DikteTest):
         self.assertFalse(window.cleanup_opencode_model_row.isHidden())
         self.assertTrue(window.cleanup_model_row.isHidden())
 
+    def test_requesty_answering_refills_both_of_its_boxes(self):
+        conf = self.config(cleanup_requesty_model="my-own-model")
+        window = self.window(conf)
+        window._on_requesty_models_loaded(["gpt-5.4-mini", "openai/gpt-4o-mini"], "")
+        for combo in (window.cleanup_requesty_model,
+                      window.assistant_requesty_model):
+            with self.subTest(combo=combo.objectName() or "combo"):
+                offered = [combo.itemText(i) for i in range(combo.count())]
+                self.assertEqual(offered, ["gpt-5.4-mini", "openai/gpt-4o-mini"])
+        self.assertEqual(window.cleanup_requesty_model.currentText(),
+                         "my-own-model")
+
+    def test_requesty_s_list_arriving_at_open_leaves_the_other_boxes_alone(self):
+        window = self.window(self.config(cleanup_requesty_model="my-own-model"))
+        before = window.cleanup_model.count()
+        window._on_hosted_models_loaded("requesty", ["gpt-5.4-mini"])
+        combo = window.cleanup_requesty_model
+        self.assertEqual([combo.itemText(i) for i in range(combo.count())],
+                         ["gpt-5.4-mini"])
+        self.assertEqual(combo.currentText(), "my-own-model")
+        self.assertEqual(window.cleanup_model.count(), before)
+
+    def test_requesty_agent_shows_its_own_box(self):
+        window = self.window(cfg.Config())
+        window._select_data(window.assistant_provider, "requesty")
+        self.assertFalse(window.requesty_box.isHidden())
+        self.assertTrue(window.openrouter_box.isHidden())
+        self.assertTrue(window.opencode_box.isHidden())
+
     def test_agy_answering_refills_both_of_its_boxes(self):
         """The same arrangement as Codex: both boxes, nothing chosen is lost."""
         conf = self.config(cleanup_agy_model="my-own-model")
@@ -514,10 +574,12 @@ class Settings(DikteTest):
     def test_a_key_on_file_is_fetched_with_at_open(self):
         window = self.window(self.config(openrouter_api_key="sk-or-x",
                                          gemini_api_key="AIza-x",
-                                         opencode_api_key="opencode-x"))
+                                         deepseek_api_key="sk-deepseek-x",
+                                         opencode_api_key="opencode-x",
+                                         requesty_api_key="rqsty-x"))
         with mock.patch.object(settings_ui.threading, "Thread") as thread:
             REAL_LOAD_HOSTED_MODELS(window)
-        self.assertEqual(thread.call_count, 3)
+        self.assertEqual(thread.call_count, 5)
 
     def test_the_update_line_names_the_version_that_is_running(self):
         window = self.window(cfg.Config())
@@ -693,6 +755,16 @@ class Settings(DikteTest):
         window.transcribe_provider.setCurrentIndex(
             window.transcribe_provider.findData("openai"))
         self.assertFalse(window.stt_form.isRowVisible(window.file_model_row))
+
+    def test_requesty_has_no_speech_model_list_to_fetch(self):
+        window = self.window(cfg.Config())
+        window.transcribe_provider.setCurrentIndex(
+            window.transcribe_provider.findData("requesty"))
+        self.assertTrue(window.refresh_transcribe_models.isHidden())
+        self.assertFalse(window.stt_form.isRowVisible(window.file_model_row))
+        window.transcribe_provider.setCurrentIndex(
+            window.transcribe_provider.findData("openrouter"))
+        self.assertFalse(window.refresh_transcribe_models.isHidden())
 
     def test_the_provider_box_offers_every_provider_config_knows(self):
         window = self.window(cfg.Config())
@@ -1167,23 +1239,19 @@ class Overlay(DikteTest):
         self.assertTrue(flags & Qt.WindowType.WindowStaysOnTopHint)
 
     def test_it_lets_a_click_through_to_whatever_is_under_it(self):
-        """It stays mapped while idle, so without this its corner of the screen
-        would stop taking clicks for good. The widget attribute is not enough:
-        on a top-level window it only makes Qt drop the event it already took."""
+        """A visible indicator must not intercept clicks beneath it."""
         from PyQt6.QtCore import Qt
         flags = self.overlay().windowFlags()
         self.assertTrue(flags & Qt.WindowType.WindowTransparentForInput)
 
-    def test_the_one_that_takes_clicks_shrinks_out_of_the_way(self):
-        """It has to stay clickable, so it cannot be transparent to input; it
-        gets out of the way by leaving nothing there to click instead."""
+    def test_the_one_that_takes_clicks_unmaps_when_dismissed(self):
         widget = self.overlay(dismissable=True)
         widget.show_busy("Asking Claude…")
-        self.assertGreater(widget.width(), 1)
+        self.assertTrue(widget.isVisible())
         widget.dismiss()
-        self.assertEqual((widget.width(), widget.height()), (1, 1))
+        self.assertFalse(widget.isVisible())
         widget.show_busy("Asking Claude…")
-        self.assertGreater(widget.width(), 1)
+        self.assertTrue(widget.isVisible())
 
     def test_recording_then_working_then_done(self):
         widget = self.overlay()
@@ -1195,6 +1263,7 @@ class Overlay(DikteTest):
         widget.show_done("Pasted")
         widget._conceal()
         self.assertFalse(widget.showing)
+        self.assertFalse(widget.isVisible())
 
     def test_a_held_recording_says_so_and_stops_moving(self):
         """Everything about the ribbon says a recording is running; a pause the
@@ -1457,6 +1526,9 @@ class LocalModels(DikteTest):
                                             "_load_agy_models"))
         self.enterContext(mock.patch.object(settings_ui.SettingsWindow,
                                             "_load_hosted_models"))
+        self.enterContext(mock.patch.object(
+            settings_ui.SettingsWindow, "_refresh_processing_devices"
+        ))
 
     def window(self, conf):
         window = settings_ui.SettingsWindow(conf)
@@ -1671,8 +1743,10 @@ class LocalModels(DikteTest):
         mine.chmod(0o755)
         self.patch_attr(ggml.shutil, "which", lambda name: None)
         box = self.window(self.config(local_binary=str(mine))).local_whisper
-        self.assertIn(str(mine), box.program_label.text())
-        self.assertFalse(box.install_button.isVisibleTo(box))
+        self.assertIn("Using custom build:", box.program_label.text())
+        self.assertIn(str(mine.resolve()), box.program_label.text())
+        # A managed build may still be downloaded without changing this draft.
+        self.assertTrue(box.install_button.isVisibleTo(box))
 
     def test_a_model_over_a_program_set_by_hand_is_ready(self):
         # The program is there, it is just named by the settings rather than
@@ -1900,6 +1974,308 @@ class LocalModels(DikteTest):
         box.repo.setCurrentText("ggml-org/nobody-wrote-a-note-GGUF")
         self.assertEqual(box.repo_note.text(), "")
 
+    def test_program_status_describes_the_custom_executable_not_the_download(self):
+        custom = self.path("custom-server")
+        custom.write_text("")
+        custom.chmod(0o755)
+        conf = self.config(local_binary=str(custom), local_llm_binary=str(custom))
+        with mock.patch.object(ggml, "installed_program", return_value="/managed/server"), \
+                mock.patch.object(ggml.shutil, "which", return_value=None), \
+                mock.patch.object(ggml, "installed_version", return_value="v-new"):
+            window = self.window(conf)
+            for box in (window.local_whisper, window.local_llm):
+                self.assertIn(str(custom.resolve()), box.program_label.text())
+                self.assertNotIn("Downloaded:", box.program_label.text())
+                box._on_installed("/managed/server", "")
+                self.assertIn(str(custom.resolve()), box.program_label.text())
+            with mock.patch.object(QMessageBox, "information"):
+                window._save()
+        self.assertEqual(conf["local_binary"], str(custom))
+        self.assertEqual(conf["local_llm_binary"], str(custom))
+
+    def test_automatic_program_selection_is_a_draft_until_save(self):
+        conf = self.config(local_binary="/custom/a", local_llm_binary="/custom/llm")
+        with mock.patch.object(ggml.shutil, "which", return_value="/system/server"), \
+                mock.patch.object(ggml, "installed_program", return_value="/managed/b"):
+            window = self.window(conf)
+            for box in (window.local_whisper, window.local_llm):
+                buttons = [b for b in box.findChildren(settings_ui.QPushButton)
+                           if b.text() == "Use automatic selection"]
+                self.assertEqual(len(buttons), 1)
+                self.assertFalse(buttons[0].isHidden())
+                buttons[0].click()
+                self.assertIn("/system/server", box.program_label.text())
+                self.assertNotIn("Downloaded:", box.program_label.text())
+                self.assertTrue(buttons[0].isHidden())
+            self.assertEqual(conf["local_binary"], "/custom/a")
+            self.assertEqual(conf["local_llm_binary"], "/custom/llm")
+            with mock.patch.object(QMessageBox, "information"):
+                window._save()
+        self.assertEqual(self.read_config_file()["local_binary"], "")
+        self.assertEqual(self.read_config_file()["local_llm_binary"], "")
+
+    def test_failed_redownload_keeps_effective_status_and_refreshes_devices(self):
+        custom = self.path("custom-server")
+        custom.write_text("")
+        custom.chmod(0o755)
+        window = self.window(self.config(local_binary=str(custom)))
+        refreshed = mock.Mock()
+        window.local_whisper.program_changed.connect(refreshed)
+        box = window.local_whisper
+        box.install_button.setEnabled(False)
+        box._on_installed("", "Network failed")
+        self.assertIn("Network failed", box.program_label.text())
+        self.assertIn(str(custom.resolve()), box.program_label.text())
+        self.assertTrue(box.install_button.isEnabled())
+        self.assertFalse(box.automatic_button.isHidden())
+        refreshed.assert_called_once_with()
+
+    def test_unverified_graphics_selection_explains_why_inventory_is_not_a_choice(self):
+        identifier = "vulkan:00112233445566778899aabbccddeeff"
+        device = hardware.GraphicsDevice("Detected GPU", 12 << 30, False, identifier, None)
+        window = self.window(self.config(local_device=identifier))
+        original_environment = dict(os.environ)
+        base_environment = dict(os.environ)
+        base_environment.pop("GGML_VK_VISIBLE_DEVICES", None)
+        for managed, environment, reason in (
+                (False, {}, "custom or unmanaged program"),
+                (True, {"GGML_VK_VISIBLE_DEVICES": "0"}, "GGML_VK_VISIBLE_DEVICES"),
+                (True, {}, "mapping could not be verified")):
+            with self.subTest(reason=reason), \
+                    mock.patch.object(ggml, "managed_vulkan_in_use", return_value=managed), \
+                    mock.patch.object(ggml, "accelerator", return_value="Vulkan"), \
+                    mock.patch.dict(
+                        os.environ, base_environment | environment, clear=True
+                    ):
+                window._set_processing_devices((device,), ())
+                text = window.local_whisper.machine_label.text()
+                self.assertIn("Detected GPU", text)
+                self.assertIn(reason, text)
+                self.assertIn("Automatic may still use a graphics card", text)
+                self.assertEqual(window.local_device.currentData(), identifier)
+                self.assertIn("unavailable", window.local_device.currentText())
+        self.assertEqual(dict(os.environ), original_environment)
+        window._set_processing_devices((), ())
+        self.assertNotIn("Detected GPU", window.local_whisper.machine_label.text())
+        self.assertIn("Graphics card unavailable", window.local_whisper.machine_label.text())
+
+    def test_explicit_managed_copy_is_labeled_downloaded_even_with_a_system_copy(self):
+        binary = self.path("managed-server")
+        binary.write_text("")
+        binary.chmod(0o755)
+        with mock.patch.object(ggml, "installed_program", return_value=str(binary)), \
+                mock.patch.object(ggml, "system_program", return_value=True), \
+                mock.patch.object(ggml, "installed_version", return_value="v-new"):
+            box = self.window(self.config(local_binary=str(binary))).local_whisper
+            self.assertIn("Downloaded: whisper.cpp, version v-new", box.program_label.text())
+
+    def test_redownload_then_automatic_reprobes_the_draft_and_rejects_old_results(self):
+        identifier = "vulkan:00112233445566778899aabbccddeeff"
+        device = hardware.GraphicsDevice("Detected GPU", 12 << 30, False, identifier, 0)
+        custom = self.path("custom-a")
+        binary = self.path("bin/whisper/b/whisper-server")
+        replacement = self.path("bin/whisper/c/whisper-server")
+        for path in (custom, binary, replacement):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("")
+            path.chmod(0o755)
+        record = self.path("bin/whisper/installed.json")
+        record.write_text(json.dumps({"binary": str(binary), "tag": "b", "backend": "vulkan"}))
+        workers = []
+
+        class DeferredThread:
+            def __init__(self, target, daemon=False):
+                workers.append(target)
+
+            def start(self):
+                pass
+
+        conf = self.config(local_binary=str(custom), local_device=identifier)
+        with mock.patch.object(settings_ui.SettingsWindow, "_refresh_processing_devices",
+                               REAL_REFRESH_PROCESSING_DEVICES), \
+                mock.patch.object(settings_ui.threading, "Thread", DeferredThread), \
+                mock.patch.object(ggml.shutil, "which", return_value=None), \
+                mock.patch.object(hardware, "graphics_devices", return_value=(device,)), \
+                mock.patch.object(ggml, "managed_vulkan_devices", side_effect=lambda selected, devices:
+                                  devices if ggml.managed_vulkan_in_use(selected) else ()) as probe:
+            window = self.window(conf)
+            box = window.local_whisper
+            workers.pop()()
+            self.assertIn("custom or unmanaged program", box.machine_label.text())
+            record.write_text(json.dumps({"binary": str(replacement), "tag": "c", "backend": "vulkan"}))
+            box._on_installed(str(replacement), "")
+            old_worker = workers.pop()
+            self.assertIn(str(custom.resolve()), box.program_label.text())
+            self.assertEqual(conf["local_binary"], str(custom))
+            box.automatic_button.click()
+            self.assertIn("version c", box.program_label.text())
+            workers.pop()()
+            self.assertEqual(probe.call_args.args[0], str(replacement))
+            self.assertEqual(window.local_device.currentData(), identifier)
+            self.assertNotIn("unavailable", window.local_device.currentText())
+            old_worker()
+            self.assertEqual(probe.call_args.args[0], str(custom.resolve()))
+            self.assertNotIn("unavailable", window.local_device.currentText())
+            box._on_installed("", "Retry failed")
+            workers.pop()()
+            self.assertIn("version c", box.program_label.text())
+            self.assertIn("Retry failed", box.program_label.text())
+            self.assertNotIn("unavailable", window.local_device.currentText())
+            self.assertEqual(conf["local_binary"], str(custom))
+            with mock.patch.object(QMessageBox, "information"):
+                window._save()
+        self.assertEqual(self.read_config_file()["local_binary"], "")
+        self.assertEqual(self.read_config_file()["local_device"], identifier)
+
+    def test_missing_custom_program_does_not_claim_the_managed_copy_is_usable(self):
+        with mock.patch.object(ggml, "installed_program", return_value="/managed/server"), \
+                mock.patch.object(ggml.shutil, "which", return_value=None):
+            box = self.window(self.config(local_binary="/missing/custom")).local_whisper
+            self.assertIn("/missing/custom", box.program_label.text())
+            self.assertIn("unavailable", box.program_label.text())
+            self.assertNotIn("Downloaded:", box.program_label.text())
+            self.assertEqual(box.install_button.text(), "Download again")
+            self.assertFalse(box.automatic_button.isHidden())
+
+    def test_changing_the_draft_invalidates_previous_device_verification_immediately(self):
+        identifier = "vulkan:00112233445566778899aabbccddeeff"
+        device = hardware.GraphicsDevice("Detected GPU", 12 << 30, False, identifier, 0)
+        with mock.patch.object(settings_ui.SettingsWindow, "_refresh_processing_devices",
+                               REAL_REFRESH_PROCESSING_DEVICES), \
+                mock.patch.object(settings_ui.threading, "Thread"):
+            window = self.window(self.config(local_binary="/custom/a", local_device=identifier))
+            window._set_processing_devices((device,), (device,))
+            self.assertNotIn("unavailable", window.local_device.currentText())
+            window.local_whisper.automatic_button.click()
+            self.assertEqual(window.local_device.currentData(), identifier)
+            self.assertIn("unavailable", window.local_device.currentText())
+
+    def test_discarding_a_program_draft_rejects_its_device_probe(self):
+        identifier = "vulkan:00112233445566778899aabbccddeeff"
+        device = hardware.GraphicsDevice(
+            "Detected GPU", 12 << 30, False, identifier, 0
+        )
+        workers = []
+
+        class DeferredThread:
+            def __init__(self, target, daemon=False):
+                workers.append(target)
+
+            def start(self):
+                pass
+
+        conf = self.config(local_binary="/custom/a", local_device=identifier)
+        with mock.patch.object(
+                settings_ui.SettingsWindow, "_refresh_processing_devices",
+                REAL_REFRESH_PROCESSING_DEVICES
+        ), mock.patch.object(
+                settings_ui.threading, "Thread", DeferredThread
+        ), mock.patch.object(
+                hardware, "graphics_devices", return_value=(device,)
+        ), mock.patch.object(
+                ggml, "program_path",
+                side_effect=lambda program, custom="": custom or "/managed/b"
+        ), mock.patch.object(
+                ggml, "managed_vulkan_devices",
+                side_effect=lambda binary, devices: (
+                    devices if binary == "/managed/b" else ()
+                )
+        ):
+            window = self.window(conf)
+            workers.pop(0)()
+            self.assertIn("unavailable", window.local_device.currentText())
+            window.local_whisper.automatic_button.click()
+            window._discard_changes()
+            self.assertEqual(window.local_whisper.custom_binary, "/custom/a")
+            workers.pop(0)()  # Automatic's now-stale managed probe.
+            self.assertIn("unavailable", window.local_device.currentText())
+            workers.pop(0)()  # The restored custom program's probe.
+            self.assertIn("unavailable", window.local_device.currentText())
+
+    def test_clean_cli_reload_reprobes_the_new_program(self):
+        identifier = "vulkan:00112233445566778899aabbccddeeff"
+        device = hardware.GraphicsDevice(
+            "Detected GPU", 12 << 30, False, identifier, 0
+        )
+        workers = []
+
+        class DeferredThread:
+            def __init__(self, target, daemon=False):
+                workers.append(target)
+
+            def start(self):
+                pass
+
+        conf = self.config(local_binary="/custom/a", local_device=identifier)
+        with mock.patch.object(
+                settings_ui.SettingsWindow, "_refresh_processing_devices",
+                REAL_REFRESH_PROCESSING_DEVICES
+        ), mock.patch.object(
+                settings_ui.threading, "Thread", DeferredThread
+        ), mock.patch.object(
+                hardware, "graphics_devices", return_value=(device,)
+        ), mock.patch.object(
+                ggml, "program_path",
+                side_effect=lambda program, custom="": custom or "/managed/b"
+        ), mock.patch.object(
+                ggml, "managed_vulkan_devices",
+                side_effect=lambda binary, devices: (
+                    devices if binary == "/managed/b" else ()
+                )
+        ):
+            window = self.window(conf)
+            # Model-list setup can finish after the constructor snapshot; this
+            # test starts from the settled, clean form that receives CLI reloads.
+            window._saved_form = window._form_values()
+            conf["local_binary"] = ""
+            window.refresh_configuration()
+            self.assertEqual(window.local_whisper.custom_binary, "")
+            self.assertEqual(len(workers), 2)
+            workers.pop(0)()  # The pre-reload custom probe is stale.
+            self.assertIn("unavailable", window.local_device.currentText())
+            workers.pop(0)()
+            self.assertNotIn("unavailable", window.local_device.currentText())
+            self.assertEqual(window.dirty_label.text(), "")
+
+    def test_saving_a_device_edit_keeps_its_legacy_pair_during_cli_reload(self):
+        identifier = "vulkan:00112233445566778899aabbccddeeff"
+        device = hardware.GraphicsDevice(
+            "Detected GPU", 12 << 30, False, identifier, 0
+        )
+        conf = self.config(local_device="auto", local_gpu=True)
+        window = self.window(conf)
+        window._set_processing_devices((device,), (device,))
+        window.local_device.setCurrentIndex(
+            window.local_device.findData(identifier)
+        )
+        # A CLI update landed while this form retained an intentional edit.
+        conf["local_device"] = "cpu"
+        conf["local_gpu"] = False
+        with mock.patch.object(QMessageBox, "information"):
+            window._save()
+        saved = self.read_config_file()
+        self.assertEqual(
+            (saved["local_device"], saved["local_gpu"]),
+            (identifier, True),
+        )
+
+    def test_downloaded_program_label_names_the_engine(self):
+        window = self.window(cfg.Config())
+        for box, name in ((window.local_whisper, "whisper.cpp"),
+                          (window.local_llm, "llama.cpp")):
+            for cpu_fallback in (False, True):
+                with self.subTest(engine=name, cpu_fallback=cpu_fallback), \
+                        mock.patch.object(ggml, "program_path", return_value="/managed/server"), \
+                        mock.patch.object(ggml, "installed_program", return_value="/managed/server"), \
+                        mock.patch.object(ggml, "system_program", return_value=False), \
+                        mock.patch.object(ggml, "vulkan_missing", return_value=cpu_fallback), \
+                        mock.patch.object(ggml, "installed_version", return_value="v1.9.3"):
+                    box._show_program()
+                    expected = f"Downloaded: {name}, version v1.9.3."
+                    if cpu_fallback:
+                        expected += " There was no Vulkan build, so this one runs on the processor."
+                    self.assertEqual(box.program_label.text(), expected)
+
     def test_the_box_says_what_this_machine_will_run_on(self):
         box = self.window(cfg.Config()).local_whisper
         with mock.patch.object(ggml, "accelerator", return_value="Vulkan"), \
@@ -1908,12 +2284,337 @@ class LocalModels(DikteTest):
         self.assertIn("Vulkan", box.machine_label.text())
         self.assertIn("32.0 GB", box.machine_label.text())
 
+    def test_the_machine_summary_separates_selection_from_availability(self):
+        identifier = "vulkan:00112233445566778899aabbccddeeff"
+        device = hardware.GraphicsDevice(
+            "AMD Radeon RX 6750 XT", 12 << 30, False, identifier, 0,
+        )
+        expected = {
+            "cpu": ("Selected: Processor (CPU)",
+                    "Graphics: AMD Radeon RX 6750 XT (12.0 GB dedicated)",
+                    "Memory: 32.0 GB system"),
+            "auto": ("Selected: Automatic",
+                     "Graphics: AMD Radeon RX 6750 XT (12.0 GB dedicated)",
+                     "Memory: 32.0 GB system"),
+            identifier: ("Selected: AMD Radeon RX 6750 XT",
+                         "Memory: 12.0 GB dedicated graphics; 32.0 GB system"),
+        }
+        box = self.window(cfg.Config()).local_whisper
+        with mock.patch.object(ggml, "total_memory", return_value=32 << 30):
+            for selection, phrases in expected.items():
+                with self.subTest(selection=selection):
+                    box._show_machine(selection, (device,))
+                    text = box.machine_label.text()
+                    for phrase in phrases:
+                        self.assertIn(phrase, text)
+
+    def test_machine_summary_puts_each_hardware_fact_on_its_own_line(self):
+        device = hardware.GraphicsDevice("AMD Radeon RX 6750 XT", 12 << 30, False)
+        box = self.window(cfg.Config()).local_whisper
+        with mock.patch.object(ggml, "total_memory", return_value=32 << 30):
+            box._show_machine("auto", (device,))
+        lines = box.machine_label.text().splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(lines[0].startswith("Selected: Automatic"))
+        self.assertTrue(lines[1].startswith("Graphics: AMD Radeon RX 6750 XT"))
+        self.assertTrue(lines[2].startswith("Memory: 32.0 GB system"))
+
+    def test_automatic_cpu_threads_are_in_collapsed_advanced_options(self):
+        conf = self.config()
+        window = self.window(conf)
+        self.assertEqual(window.local_threads.value(), 0)
+        self.assertFalse(window.local_threads.isVisibleTo(window.local_options))
+        self.assertTrue(window.local_device.isVisibleTo(window.local_options))
+        self.assertTrue(window.local_preload.isVisibleTo(window.local_options))
+        window.local_advanced_toggle.click()
+        self.assertTrue(window.local_threads.isVisibleTo(window.local_options))
+        self.assertEqual(conf["local_threads"], 0)
+        window.local_advanced_toggle.click()
+        self.assertFalse(window.local_threads.isVisibleTo(window.local_options))
+        self.assertEqual(window.local_threads.value(), 0)
+        with mock.patch.object(QMessageBox, "information"):
+            window._save()
+        self.assertEqual(self.read_config_file()["local_threads"], 0)
+
+    def test_advanced_threads_share_the_processing_device_field_column(self):
+        window = self.window(self.config())
+        window.tabs.setCurrentIndex(window.api_tab_index)
+        window.local_advanced_toggle.setChecked(True)
+        window.show()
+        QApplication.processEvents()
+        device_x = window.local_device.mapTo(window.local_options, QPoint()).x()
+        threads_x = window.local_threads.mapTo(window.local_options, QPoint()).x()
+        self.assertEqual(threads_x, device_x)
+        self.assertGreaterEqual(
+            window.local_advanced_toggle.width(), window.local_device.width()
+        )
+
+    def test_saved_manual_threads_are_revealed_without_changing_them(self):
+        conf = self.config(local_threads=2)
+        with mock.patch.object(hardware, "cpu_threads", return_value=8):
+            window = self.window(conf)
+        self.assertTrue(window.local_threads.isVisibleTo(window.local_options))
+        self.assertTrue(window.local_advanced_toggle.isChecked())
+        self.assertEqual(window.local_threads.value(), 2)
+        window.local_advanced_toggle.click()
+        self.assertEqual(conf["local_threads"], 2)
+        with mock.patch.object(QMessageBox, "information"):
+            window._save()
+        self.assertEqual(self.read_config_file()["local_threads"], 2)
+
+    def test_thread_limit_uses_the_cpus_available_to_the_process(self):
+        with mock.patch.object(os, "sched_getaffinity", return_value=set(range(6)),
+                               create=True), \
+                mock.patch.object(os, "cpu_count", return_value=32):
+            window = self.window(self.config(local_threads=0))
+        self.assertEqual(window.local_threads.maximum(), 6)
+        self.assertEqual(window.local_threads.minimum(), 0)
+        self.assertEqual(window.local_threads.text(), "Automatic")
+        window.local_threads.setValue(30)
+        self.assertEqual(window.local_threads.value(), 6)
+
+    def test_thread_limit_adapts_to_small_and_large_machines(self):
+        for count in (2, 8, 16, 96):
+            with self.subTest(logical_cpus=count), \
+                    mock.patch.object(os, "sched_getaffinity",
+                                      return_value=set(range(count)), create=True):
+                window = self.window(self.config(local_threads=0))
+                self.assertEqual(window.local_threads.maximum(), count)
+                self.assertEqual(window.local_threads.text(), "Automatic")
+
+    def test_an_untouched_oversized_thread_preference_is_not_destroyed(self):
+        conf = self.config(local_threads=30)
+        with mock.patch.object(hardware, "cpu_threads", return_value=8):
+            window = self.window(conf)
+        self.assertEqual(window.local_threads.value(), 8)
+        self.assertEqual(conf["local_threads"], 30)
+        with mock.patch.object(QMessageBox, "information"):
+            window._save()
+        self.assertEqual(conf["local_threads"], 30)
+        self.assertEqual(self.read_config_file()["local_threads"], 30)
+
+    def test_a_value_larger_than_qt_can_hold_opens_at_the_runtime_cap(self):
+        stored = 2 ** 40
+        conf = self.config(local_threads=stored)
+        with mock.patch.object(hardware, "cpu_threads", return_value=8):
+            window = self.window(conf)
+        self.assertEqual(window.local_threads.value(), 8)
+        self.assertEqual(conf["local_threads"], stored)
+        with mock.patch.object(QMessageBox, "information"):
+            window._save()
+        self.assertEqual(self.read_config_file()["local_threads"], stored)
+
+    def test_editing_a_bounded_thread_preference_saves_the_new_value(self):
+        conf = self.config(local_threads=30)
+        with mock.patch.object(hardware, "cpu_threads", return_value=8):
+            window = self.window(conf)
+        window.local_threads.setValue(7)
+        with mock.patch.object(QMessageBox, "information"):
+            window._save()
+        self.assertEqual(conf["local_threads"], 7)
+        self.assertEqual(self.read_config_file()["local_threads"], 7)
+
+    def test_the_processing_device_loads_cpu_without_a_checkbox(self):
+        window = self.window(self.config(local_device="cpu", local_gpu=False))
+        self.assertIsInstance(window.local_device, settings_ui.QComboBox)
+        self.assertEqual(window.local_device.currentData(), "cpu")
+
+    def test_processing_device_discovery_does_not_run_on_the_ui_thread(self):
+        workers = []
+
+        class DeferredThread:
+            def __init__(self, target, daemon=False):
+                workers.append((target, daemon))
+
+            def start(self):
+                pass
+
+        with mock.patch.object(
+                settings_ui.SettingsWindow, "_refresh_processing_devices",
+                REAL_REFRESH_PROCESSING_DEVICES
+        ), mock.patch.object(
+                settings_ui.threading, "Thread", DeferredThread
+        ), mock.patch.object(hardware, "graphics_devices") as inventory, \
+                mock.patch.object(ggml, "managed_vulkan_devices") as backend:
+            window = self.window(cfg.Config())
+        inventory.assert_not_called()
+        backend.assert_not_called()
+        self.assertTrue(workers)
+        self.assertTrue(workers[0][1])
+        self.assertEqual(
+            [window.local_device.itemData(row)
+             for row in range(window.local_device.count())],
+            ["auto", "cpu"],
+        )
+
+    def test_installing_the_managed_program_refreshes_device_choices(self):
+        refresh = mock.Mock()
+        with mock.patch.object(
+                settings_ui.SettingsWindow, "_refresh_processing_devices", refresh
+        ):
+            window = self.window(cfg.Config())
+            refresh.reset_mock()
+            window.local_whisper.changed.emit()
+            refresh.assert_not_called()
+            window.local_whisper._on_installed("", "")
+        refresh.assert_called_once_with()
+
+    def test_an_old_device_probe_cannot_overwrite_a_newer_result(self):
+        old = hardware.GraphicsDevice(
+            "Old GPU", 4 << 30, False, "vulkan:old", 0
+        )
+        new = hardware.GraphicsDevice(
+            "New GPU", 12 << 30, False, "vulkan:new", 0
+        )
+        workers = []
+
+        class DeferredThread:
+            def __init__(self, target, daemon=False):
+                workers.append(target)
+
+            def start(self):
+                pass
+
+        with mock.patch.object(
+                settings_ui.SettingsWindow, "_refresh_processing_devices",
+                REAL_REFRESH_PROCESSING_DEVICES
+        ), mock.patch.object(
+                settings_ui.threading, "Thread", DeferredThread
+        ), mock.patch.object(
+                hardware, "graphics_devices", side_effect=((new,), (old,))
+        ), mock.patch.object(
+                ggml, "managed_vulkan_devices", side_effect=((new,), (old,))
+        ):
+            window = self.window(cfg.Config())
+            workers.clear()
+            window._refresh_processing_devices()
+            window._refresh_processing_devices()
+            self.assertEqual(len(workers), 2)
+            workers[1]()
+            workers[0]()
+        labels = [
+            window.local_device.itemText(row)
+            for row in range(window.local_device.count())
+        ]
+        self.assertTrue(any("New GPU" in label for label in labels))
+        self.assertFalse(any("Old GPU" in label for label in labels))
+
+    def test_saving_the_processing_device_keeps_the_legacy_gpu_setting_compatible(self):
+        conf = self.config(local_device="auto", local_gpu=True)
+        window = self.window(conf)
+        window.local_device.setCurrentIndex(
+            window.local_device.findData("cpu")
+        )
+        with mock.patch.object(QMessageBox, "information"):
+            window._save()
+        self.assertEqual(conf["local_device"], "cpu")
+        self.assertFalse(conf["local_gpu"])
+
+    def test_changing_the_processing_device_updates_the_summary_immediately(self):
+        window = self.window(self.config(local_device="cpu", local_gpu=False))
+        self.assertIn("Selected: Processor (CPU)",
+                      window.local_whisper.machine_label.text())
+        window.local_device.setCurrentIndex(0)
+        self.assertIn("Selected: Automatic",
+                      window.local_whisper.machine_label.text())
+
+    def test_a_saved_card_that_is_gone_stays_selected_as_unavailable(self):
+        identifier = "vulkan:00112233445566778899aabbccddeeff"
+        window = self.window(self.config(local_device=identifier, local_gpu=True))
+        self.assertEqual(window.local_device.currentData(), identifier)
+        self.assertIn("unavailable", window.local_device.currentText())
+        self.assertIn("Graphics card unavailable",
+                      window.local_whisper.machine_label.text())
+
+    def test_background_device_result_replaces_the_unavailable_placeholder(self):
+        identifier = "vulkan:00112233445566778899aabbccddeeff"
+        device = hardware.GraphicsDevice(
+            "AMD Radeon RX 6750 XT", 12 << 30, False, identifier, 0
+        )
+        with mock.patch.object(settings_ui.threading, "Thread"):
+            window = self.window(self.config(
+                local_device=identifier, local_gpu=True
+            ))
+        window._set_processing_devices((device,), (device,))
+        self.assertEqual(window.local_device.currentData(), identifier)
+        self.assertNotIn("unavailable", window.local_device.currentText())
+        self.assertEqual(window.local_device.currentText(), "AMD Radeon RX 6750 XT")
+        self.assertIn("12.0 GB dedicated graphics",
+                      window.local_whisper.machine_label.text())
+
+    def test_an_unmapped_raw_card_is_not_reported_as_selected(self):
+        identifier = "vulkan:00112233445566778899aabbccddeeff"
+        device = hardware.GraphicsDevice(
+            "Present but unmappable GPU", 12 << 30, False, identifier, None
+        )
+        with mock.patch.object(settings_ui.threading, "Thread"):
+            window = self.window(self.config(
+                local_device=identifier, local_gpu=True
+            ))
+        window._set_processing_devices((device,), ())
+        self.assertIn("unavailable", window.local_device.currentText())
+        self.assertIn("Selected: Graphics card unavailable",
+                      window.local_whisper.machine_label.text())
+        self.assertNotIn("Selected: Present but unmappable GPU",
+                         window.local_whisper.machine_label.text())
+
+    def test_a_managed_vulkan_card_is_an_explicit_processing_choice(self):
+        identifier = "vulkan:00112233445566778899aabbccddeeff"
+        device = hardware.GraphicsDevice(
+            "AMD Radeon RX 6750 XT", 12 << 30, False, identifier, 0,
+        )
+        binary = self.path("bin/whisper/v1.9.3/whisper-server")
+        binary.parent.mkdir(parents=True)
+        binary.write_text("")
+        binary.chmod(0o755)
+        self.path("bin/whisper/installed.json").write_text(json.dumps({
+            "tag": "v1.9.3", "binary": str(binary), "backend": "vulkan",
+        }))
+        self.patch_attr(ggml.shutil, "which", lambda name: None)
+        workers = []
+
+        class DeferredThread:
+            def __init__(self, target, daemon=False):
+                workers.append(target)
+
+            def start(self):
+                pass
+
+        with mock.patch.object(
+                settings_ui.SettingsWindow, "_refresh_processing_devices",
+                REAL_REFRESH_PROCESSING_DEVICES
+        ), mock.patch.object(
+                settings_ui.threading, "Thread", DeferredThread
+        ), mock.patch.object(
+                hardware, "graphics_devices", return_value=(device,)
+        ), mock.patch.object(
+                ggml, "managed_vulkan_devices", return_value=(device,)
+        ) as backend_probe:
+            window = self.window(self.config(local_device=identifier,
+                                             local_gpu=True))
+            backend_probe.assert_not_called()
+            self.assertTrue(workers)
+            workers[-1]()
+        backend_probe.assert_called_once_with(str(binary), (device,))
+        self.assertEqual(window.local_device.currentData(), identifier)
+        self.assertEqual(window.local_device.currentText(), "AMD Radeon RX 6750 XT")
+        self.assertNotIn("12.0 GB", window.local_device.currentText())
+        self.assertIn("12.0 GB dedicated graphics",
+                      window.local_whisper.machine_label.text())
+
+    def test_an_integrated_gpu_is_labelled_as_shared_memory(self):
+        device = hardware.GraphicsDevice(
+            "Intel UHD Graphics", 8 << 30, True, "vulkan:intel", 0,
+        )
+        self.assertIn("Intel UHD Graphics (8.0 GB shared)",
+                      settings_ui._graphics_device_label(device))
+
     def test_a_machine_with_no_card_is_told_it_is_on_the_processor(self):
         box = self.window(cfg.Config()).local_whisper
         with mock.patch.object(ggml, "accelerator", return_value=""), \
                 mock.patch.object(ggml, "total_memory", return_value=8 << 30):
             box._show_machine()
-        self.assertIn("processor", box.machine_label.text())
+        self.assertIn("processor", box.machine_label.text().lower())
 
     def test_a_processor_build_where_the_vulkan_one_belongs_says_so(self):
         # The Vulkan whisper-server is published by hand, and until it is
@@ -2006,6 +2707,7 @@ class LocalModels(DikteTest):
         window = self.window(cfg.Config())
         rows = {"openrouter": window.cleanup_model_row,
                 "gemini": window.cleanup_gemini_model_row,
+                "deepseek": window.cleanup_deepseek_model_row,
                 "claude": window.cleanup_claude_model,
                 "codex": window.cleanup_codex_model,
                 "agy": window.cleanup_agy_model}
@@ -2027,15 +2729,3 @@ class LocalModels(DikteTest):
                     # isHidden rather than isVisible: the window itself is never
                     # shown in a test, so nothing in it is ever visible.
                     self.assertEqual(other.isHidden(), name != chosen)
-
-    def test_local_threads_range_is_bounded_by_cpu_count(self):
-        with mock.patch("os.cpu_count", return_value=8):
-            window = self.window(cfg.Config())
-            self.assertEqual(window.local_threads.minimum(), 0)
-            self.assertEqual(window.local_threads.maximum(), 8)
-
-    def test_local_threads_range_has_safe_minimum_when_cpu_count_is_none(self):
-        with mock.patch("os.cpu_count", return_value=None):
-            window = self.window(cfg.Config())
-            self.assertEqual(window.local_threads.minimum(), 0)
-            self.assertEqual(window.local_threads.maximum(), 1)
