@@ -134,6 +134,9 @@ class Pipeline(QObject):
                     self._draining = False
                     return
                 job = self._jobs.popleft()
+            # A stop is for the run it landed on, not the dictation queued
+            # behind it.
+            self._stop.clear()
             try:
                 self._work(*job)
             finally:

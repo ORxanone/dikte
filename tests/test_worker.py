@@ -867,5 +867,48 @@ class RetriesAnswerNoWaiter(DikteTest):
         self.assertEqual(list(self.app._queued_retries), [])
 
 
+
+class CancelStopsAWaitingDictation(DikteTest):
+    """The cancel shortcut with no recording on stops a dictation that is
+    waiting out its transcription retries; with nothing pending it is a no-op."""
+
+    def bare(self, pending):
+        from dikte import app as dikte_module
+
+        class Bare:
+            recording = False
+            _cancel = dikte_module.Dikte._cancel
+
+        app = Bare()
+        app._transcripts_pending = pending
+        app.pipeline, app.overlay = mock.Mock(), mock.Mock()
+        return app
+
+    def test_cancel_with_a_dictation_pending_stops_the_pipeline(self):
+        app = self.bare(1)
+        app._cancel()
+        app.pipeline.cancel.assert_called_once_with()
+        app.overlay.show_busy.assert_called_once()
+
+    def test_cancel_with_nothing_pending_does_nothing(self):
+        app = self.bare(0)
+        app._cancel()
+        app.pipeline.cancel.assert_not_called()
+
+    def test_a_stop_does_not_carry_over_to_the_next_queued_job(self):
+        pipeline = worker.Pipeline(self.config())
+        seen = []
+
+        def work(*job):
+            seen.append((job[0], pipeline._stop.is_set()))
+            pipeline.cancel()
+
+        with mock.patch.object(pipeline, "_work", side_effect=work):
+            pipeline._jobs.extend([("a",) + (None,) * 8, ("b",) + (None,) * 8])
+            pipeline._draining = True
+            pipeline._drain()
+        self.assertEqual(seen, [("a", False), ("b", False)])
+
+
 if __name__ == "__main__":
     unittest.main()

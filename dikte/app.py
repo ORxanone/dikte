@@ -1205,8 +1205,12 @@ class Dikte:
         return max(0.0, (now - self._paused_ms) / 1000.0)
 
     def _cancel(self):
-        """Throw away whichever recording is running."""
+        """Throw away whichever recording is running. With none running, stop
+        a dictation that is still waiting out its transcription retries."""
         if not self.recording:
+            if self._transcripts_pending:
+                self.overlay.show_busy(t("Stopping…"))
+                self.pipeline.cancel()
             return
         asking = self.ask_state == RECORDING
         self._stop_held_since = None
